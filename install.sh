@@ -70,6 +70,15 @@ else
     echo
     
     # Domain
+    echo "Domain name for your Horilla HRMS instance:"
+    echo "  - You can use a custom domain like 'hrms.example.com' (requires DNS setup)"
+    echo "  - Or use the default .nip.io domain which works without DNS configuration"
+    echo
+    echo "If using a custom domain, make sure you have created an A record pointing to this server's IP ($SERVER_IP):"
+    echo "  - Type: A"
+    echo "  - Name/Host: hrms (for hrms.example.com)"
+    echo "  - Value/Points to: $SERVER_IP"
+    echo
     read -p "Domain name [${DEFAULT_DOMAIN}]: " DOMAIN
     DOMAIN=${DOMAIN:-$DEFAULT_DOMAIN}
     

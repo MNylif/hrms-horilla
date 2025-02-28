@@ -16,6 +16,22 @@ sudo bash -c "$(curl -s https://raw.githubusercontent.com/MNylif/hrms-horilla/ma
 
 This will prompt you for all necessary information upfront and then proceed with the installation automatically without any further interaction.
 
+## DNS Setup for Your Domain
+
+If you want to use a custom domain (e.g., `hrms.example.com`) instead of the default `.nip.io` domain, you'll need to set up DNS records first:
+
+1. Log in to your domain registrar or DNS provider's control panel
+2. Create an A record for your subdomain pointing to your server's IP address:
+   - **Type**: A
+   - **Name/Host**: hrms (for the subdomain hrms.example.com)
+   - **Value/Points to**: Your server's IP address (e.g., 203.0.113.10)
+   - **TTL**: 3600 (or as recommended by your provider)
+
+3. Wait for DNS propagation (can take up to 24-48 hours, but often happens within minutes)
+4. Once propagated, you can use this domain during installation
+
+**Note**: If you don't have a domain or don't want to set up DNS records, the installer will use a `.nip.io` domain by default, which will work without any DNS configuration.
+
 ## Advanced Installation Options
 
 You can also provide specific parameters to the installation script:

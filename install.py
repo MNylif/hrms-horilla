@@ -258,15 +258,64 @@ class HorillaInstaller:
     def validate_domain(self, domain):
         """Validate domain format."""
         if not domain:
-            print("Domain cannot be empty.")
             return False
             
-        domain_pattern = re.compile(r'^([a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,}$')
-        if not domain_pattern.match(domain):
+        # Allow .nip.io domains (automatic DNS)
+        if domain.endswith('.nip.io'):
+            return True
+            
+        # Basic domain validation
+        domain_pattern = r'^([a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,}$'
+        if not re.match(domain_pattern, domain):
             print("Invalid domain format. Please enter a valid domain (e.g., hrms.example.com).")
             return False
             
+        # Check if domain is resolvable
+        if self.is_tty and not self.force_continue:
+            try:
+                import socket
+                socket.gethostbyname(domain)
+            except socket.gaierror:
+                print(f"\nWarning: Could not resolve domain '{domain}'. This may indicate that:")
+                print("1. The DNS A record has not been set up correctly")
+                print("2. DNS changes have not propagated yet")
+                print("3. You're using a domain for internal/testing purposes only")
+                print("\nTo set up DNS correctly:")
+                print("- Log in to your domain registrar or DNS provider")
+                print("- Create an A record:")
+                print(f"  - Type: A")
+                print(f"  - Name/Host: {domain.split('.')[0]} (for {domain})")
+                print(f"  - Value/Points to: {self.get_server_ip()}")
+                print("\nDo you want to continue anyway? (y/n)")
+                
+                try:
+                    choice = input().strip().lower()
+                    if choice != 'y':
+                        return False
+                except (EOFError, KeyboardInterrupt):
+                    return False
+                    
         return True
+        
+    def get_server_ip(self):
+        """Get the server's public IP address."""
+        try:
+            # Try to get the public IP
+            import urllib.request
+            return urllib.request.urlopen('https://api.ipify.org').read().decode('utf8')
+        except:
+            # Fall back to local IP
+            import socket
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            try:
+                # doesn't even have to be reachable
+                s.connect(('10.255.255.255', 1))
+                ip = s.getsockname()[0]
+            except Exception:
+                ip = '127.0.0.1'
+            finally:
+                s.close()
+            return ip
 
     def validate_email(self, email):
         """Validate email format."""
@@ -603,7 +652,8 @@ import django
 os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'horilla.settings')
 django.setup()
 
-from django.contrib.auth.models import User
+from django.contrib.auth import get_user_model
+User = get_user_model()
 
 username = '{self.admin_username}'
 password = '{self.admin_password}'
@@ -612,8 +662,31 @@ email = '{self.email}'
 if User.objects.filter(username=username).exists():
     print(f"User {{username}} already exists.")
 else:
-    User.objects.create_superuser(username=username, email=email, password=password)
-    print(f"Superuser {{username}} created successfully.")
+    try:
+        # Try to create a superuser with the standard fields
+        User.objects.create_superuser(username=username, email=email, password=password)
+        print(f"Superuser {{username}} created successfully.")
+    except Exception as e:
+        # If that fails, try with additional fields that might be required by Horilla
+        try:
+            User.objects.create_superuser(
+                username=username, 
+                email=email, 
+                password=password,
+                is_new_employee=False
+            )
+            print(f"Superuser {{username}} created successfully with custom fields.")
+        except Exception as e2:
+            print(f"Failed to create superuser: {{e2}}")
+            # As a last resort, try using the management command
+            import subprocess
+            cmd = f"echo 'from django.contrib.auth import get_user_model; User = get_user_model(); User.objects.create_superuser(\\\"{username}\\\", \\\"{email}\\\", \\\"{password}\\\")' | python manage.py shell"
+            result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
+            if result.returncode == 0:
+                print(f"Superuser {{username}} created using management command.")
+            else:
+                print(f"All attempts to create superuser failed.")
+                print(f"Error: {{result.stderr}}")
 """
         
         with open(create_admin_script, "w") as f:
@@ -649,7 +722,22 @@ else:
         
         if not success:
             print(f"Failed to create admin user: {output}")
-            return False
+            # Try an alternative method to create the admin user
+            print("Trying alternative method to create admin user...")
+            
+            # Create a direct Django management command to create superuser
+            env_vars = f"DJANGO_SUPERUSER_USERNAME={self.admin_username} DJANGO_SUPERUSER_EMAIL={self.email} DJANGO_SUPERUSER_PASSWORD={self.admin_password}"
+            success, output = self.run_command(
+                f"{env_vars} docker compose exec web python manage.py createsuperuser --noinput",
+                shell=True,
+                cwd=self.install_dir
+            )
+            
+            if not success:
+                print(f"All attempts to create admin user failed.")
+                print("You may need to create an admin user manually after installation.")
+                print(f"Use: docker compose exec web python manage.py createsuperuser")
+                # Continue with the installation despite this error
         
         # Collect static files
         print("Collecting static files...")
@@ -661,7 +749,8 @@ else:
         
         if not success:
             print(f"Failed to collect static files: {output}")
-            return False
+            print("Static files collection failed, but the application may still work.")
+            # Continue with the installation despite this error
         
         print("✓ Application initialized successfully")
         return True
