@@ -42,6 +42,15 @@ class HorillaInstaller:
         self.retry_delay = retry_delay
         self.force_continue = force_continue
         
+        # Check if stdin is a TTY (terminal)
+        self.is_tty = sys.stdin.isatty()
+        
+        # If stdin is not a TTY, force non-interactive mode
+        if not self.is_tty:
+            self.non_interactive = True
+            self.force_continue = True
+            print("Detected non-interactive environment. Enabling force-continue mode automatically.")
+        
         # Setup signal handler for graceful exit
         signal.signal(signal.SIGINT, self._signal_handler)
         
@@ -163,22 +172,26 @@ class HorillaInstaller:
                     print("  No apt/dpkg processes found (the lock might be stale)")
                 
                 # If we've tried a few times and there's still a lock, ask what to do
-                if attempt >= 3 and not self.force_continue and not self.non_interactive:
+                if attempt >= 3 and not self.force_continue and self.is_tty:
                     print("\nThe system package manager is locked by another process.")
                     print("Options:")
                     print("  1. Wait and retry (recommended if a system update is in progress)")
                     print("  2. Abort installation")
                     print("  3. Try to continue anyway (may cause issues)")
                     
-                    choice = input("\nEnter your choice (1-3): ").strip()
-                    
-                    if choice == '2':
-                        print("Aborting installation as requested.")
-                        sys.exit(0)
-                    elif choice == '3':
-                        print("Attempting to continue despite lock issues...")
-                        # Skip this command and proceed
-                        return True, "Skipped due to lock"
+                    try:
+                        choice = input("\nEnter your choice (1-3): ").strip()
+                        
+                        if choice == '2':
+                            print("Aborting installation as requested.")
+                            sys.exit(0)
+                        elif choice == '3':
+                            print("Attempting to continue despite lock issues...")
+                            # Skip this command and proceed
+                            return True, "Skipped due to lock"
+                    except (EOFError, KeyboardInterrupt):
+                        # If we can't get input, default to option 1 (wait and retry)
+                        print("\nCannot read input. Defaulting to wait and retry.")
                 
                 if attempt < self.max_retries:
                     print(f"\nWaiting {self.retry_delay} seconds before retry {attempt}/{self.max_retries}...")
@@ -189,20 +202,25 @@ class HorillaInstaller:
             return success, output
         
         # If we're here, we've exhausted all retries
-        if not self.force_continue and not self.non_interactive:
+        if not self.force_continue and self.is_tty:
             print("\nCould not acquire package manager lock after multiple attempts.")
             print("Options:")
             print("  1. Abort installation (recommended)")
             print("  2. Try to continue anyway (may cause issues)")
             
-            choice = input("\nEnter your choice (1-2): ").strip()
-            
-            if choice == '2':
-                print("Attempting to continue despite lock issues...")
-                return True, "Skipped due to lock"
-            else:
-                print("Aborting installation as requested.")
-                sys.exit(0)
+            try:
+                choice = input("\nEnter your choice (1-2): ").strip()
+                
+                if choice == '2':
+                    print("Attempting to continue despite lock issues...")
+                    return True, "Skipped due to lock"
+                else:
+                    print("Aborting installation as requested.")
+                    sys.exit(0)
+            except (EOFError, KeyboardInterrupt):
+                # If we can't get input, default to aborting
+                print("\nCannot read input. Aborting installation.")
+                sys.exit(1)
         elif self.force_continue:
             print("Force continue enabled. Skipping this command and proceeding...")
             return True, "Skipped due to lock (force continue enabled)"
@@ -211,24 +229,44 @@ class HorillaInstaller:
 
     def get_user_input(self, prompt, default=None, validate_func=None, password=False):
         """Get user input with validation and default values."""
-        if self.non_interactive and default is not None:
+        if self.non_interactive:
+            if default is not None:
+                return default
+            else:
+                print(f"Error: Required input '{prompt}' has no default value in non-interactive mode.")
+                sys.exit(1)
+        
+        # Ensure we're in a TTY environment
+        if not self.is_tty:
+            print(f"Warning: Not in a TTY environment. Using default value: {default}")
+            if default is None:
+                print(f"Error: Required input '{prompt}' has no default value in non-TTY environment.")
+                sys.exit(1)
             return default
         
         while True:
-            if password:
-                value = getpass.getpass(prompt)
+            if default:
+                prompt_text = f"{prompt} [{default}]: "
             else:
-                value = input(prompt)
+                prompt_text = f"{prompt}: "
             
-            # Use default if empty
-            if not value and default is not None:
-                return default
-            
-            # Validate if needed
-            if validate_func and not validate_func(value):
-                continue
+            try:
+                if password:
+                    value = getpass.getpass(prompt_text)
+                else:
+                    value = input(prompt_text)
                 
-            return value
+                if not value and default:
+                    value = default
+                
+                if validate_func and not validate_func(value):
+                    print("Invalid input. Please try again.")
+                    continue
+                
+                return value
+            except (EOFError, KeyboardInterrupt):
+                print("\nInput interrupted. Exiting.")
+                sys.exit(1)
 
     def validate_domain(self, domain):
         """Validate domain format."""
