@@ -4,9 +4,6 @@ set -e
 
 echo "=== Horilla HRMS One-Line Installer ==="
 echo "This script will install Horilla HRMS on your system."
-echo "You will be prompted for necessary information during installation."
-echo "NOTE: The installation process may take 10-20 minutes depending on your system."
-echo "NOTE: If apt is locked by another process, you may need to use the --force-continue option to continue the installation."
 echo
 
 # Check if running as root
@@ -58,12 +55,47 @@ if [ ! -t 0 ]; then
         DEFAULT_ARGS="$DEFAULT_ARGS --admin-password $DEFAULT_ADMIN_PASSWORD"
     fi
     
-    # Always add non-interactive flag
+    # Always add non-interactive and force-continue flags
     if ! echo "$*" | grep -q -- "--non-interactive"; then
         DEFAULT_ARGS="$DEFAULT_ARGS --non-interactive"
     fi
+    
+    if ! echo "$*" | grep -q -- "--force-continue"; then
+        DEFAULT_ARGS="$DEFAULT_ARGS --force-continue"
+    fi
 else
-    DEFAULT_ARGS=""
+    # Interactive mode - collect all variables upfront
+    echo "Please provide the following information for your Horilla HRMS installation:"
+    echo "Press Enter to accept the default values shown in brackets."
+    echo
+    
+    # Domain
+    read -p "Domain name [${DEFAULT_DOMAIN}]: " DOMAIN
+    DOMAIN=${DOMAIN:-$DEFAULT_DOMAIN}
+    
+    # Email
+    read -p "Email address for SSL certificates [${DEFAULT_EMAIL}]: " EMAIL
+    EMAIL=${EMAIL:-$DEFAULT_EMAIL}
+    
+    # Admin username
+    read -p "Admin username [${DEFAULT_ADMIN_USER}]: " ADMIN_USER
+    ADMIN_USER=${ADMIN_USER:-$DEFAULT_ADMIN_USER}
+    
+    # Admin password
+    read -p "Admin password [${DEFAULT_ADMIN_PASSWORD}]: " ADMIN_PASSWORD
+    ADMIN_PASSWORD=${ADMIN_PASSWORD:-$DEFAULT_ADMIN_PASSWORD}
+    
+    # Installation directory
+    read -p "Installation directory [/root/horilla]: " INSTALL_DIR
+    INSTALL_DIR=${INSTALL_DIR:-/root/horilla}
+    
+    echo
+    echo "Thank you! The installation will now proceed automatically without further prompts."
+    echo "This may take 10-20 minutes depending on your system."
+    echo
+    
+    # Set all arguments for non-interactive mode
+    DEFAULT_ARGS="--domain $DOMAIN --email $EMAIL --admin-username $ADMIN_USER --admin-password $ADMIN_PASSWORD --install-dir $INSTALL_DIR --non-interactive --force-continue"
 fi
 
 # Create temporary directory

@@ -21,35 +21,22 @@ from pathlib import Path
 
 
 class HorillaInstaller:
-    def __init__(self, domain=None, email=None, install_dir=None, 
-                 db_user="postgres", db_password="postgres", db_name="horilla",
-                 admin_username=None, admin_password=None, non_interactive=False,
-                 skip_upgrade=True, timeout=600, max_retries=5, retry_delay=10,
-                 force_continue=False):
+    def __init__(self, domain=None, email=None, admin_username=None, admin_password=None, 
+                 install_dir=None, db_name="horilla", db_user="horilla", db_password="horilla",
+                 non_interactive=False, force_continue=False, skip_upgrade=False, is_tty=False):
         """Initialize the installer with configuration parameters."""
         self.domain = domain
         self.email = email
-        self.install_dir = install_dir or os.path.expanduser("~/horilla")
-        self.db_user = db_user
-        self.db_password = db_password
-        self.db_name = db_name
         self.admin_username = admin_username
         self.admin_password = admin_password
+        self.install_dir = install_dir or "/root/horilla"
+        self.db_name = db_name
+        self.db_user = db_user
+        self.db_password = db_password
         self.non_interactive = non_interactive
-        self.skip_upgrade = skip_upgrade
-        self.timeout = timeout
-        self.max_retries = max_retries
-        self.retry_delay = retry_delay
         self.force_continue = force_continue
-        
-        # Check if stdin is a TTY (terminal)
-        self.is_tty = sys.stdin.isatty()
-        
-        # If stdin is not a TTY, force non-interactive mode
-        if not self.is_tty:
-            self.non_interactive = True
-            self.force_continue = True
-            print("Detected non-interactive environment. Enabling force-continue mode automatically.")
+        self.skip_upgrade = skip_upgrade
+        self.is_tty = is_tty
         
         # Setup signal handler for graceful exit
         signal.signal(signal.SIGINT, self._signal_handler)
@@ -67,7 +54,7 @@ class HorillaInstaller:
     def run_command(self, command, shell=False, cwd=None, env=None, timeout=None):
         """Execute a shell command and return the output."""
         if timeout is None:
-            timeout = self.timeout
+            timeout = 600
 
         try:
             if isinstance(command, str) and not shell:
@@ -138,7 +125,7 @@ class HorillaInstaller:
 
     def run_apt_command(self, command, timeout=None):
         """Run an apt command with retries for lock issues."""
-        for attempt in range(1, self.max_retries + 1):
+        for attempt in range(1, 6):  # max 5 attempts
             success, output = self.run_command(command, shell=True, timeout=timeout)
             
             # Check if it's a lock error
@@ -193,9 +180,9 @@ class HorillaInstaller:
                         # If we can't get input, default to option 1 (wait and retry)
                         print("\nCannot read input. Defaulting to wait and retry.")
                 
-                if attempt < self.max_retries:
-                    print(f"\nWaiting {self.retry_delay} seconds before retry {attempt}/{self.max_retries}...")
-                    time.sleep(self.retry_delay)
+                if attempt < 5:
+                    print(f"\nWaiting {10} seconds before retry {attempt}/5...")
+                    time.sleep(10)
                     continue
             
             # Either it succeeded or it failed with a non-lock error, or we're out of retries
@@ -225,7 +212,7 @@ class HorillaInstaller:
             print("Force continue enabled. Skipping this command and proceeding...")
             return True, "Skipped due to lock (force continue enabled)"
         
-        return False, f"Failed after {self.max_retries} attempts: {command}"
+        return False, f"Failed after 5 attempts: {command}"
 
     def get_user_input(self, prompt, default=None, validate_func=None, password=False):
         """Get user input with validation and default values."""
@@ -474,91 +461,77 @@ class HorillaInstaller:
         """Configure Horilla settings."""
         print("\n[4/8] Configuring Horilla settings...")
         
-        # Get domain if not provided
+        # Get domain and email if not already provided
         if not self.domain:
             self.domain = self.get_user_input(
                 "Enter your domain (e.g., hrms.example.com): ",
                 validate_func=self.validate_domain
             )
         
-        settings_path = os.path.join(self.install_dir, "horilla", "settings.py")
-        if not os.path.exists(settings_path):
-            print(f"Error: settings.py not found at {settings_path}")
-            return False
-            
-        # Add CSRF and ALLOWED_HOSTS settings
-        with open(settings_path, "a") as f:
-            f.write(f"\n# Added by installer\n")
-            f.write(f"CSRF_TRUSTED_ORIGINS = ['https://{self.domain}', 'http://{self.domain}']\n")
-            f.write(f"ALLOWED_HOSTS = ['{self.domain}', 'localhost', '127.0.0.1', '*']\n")
-            
-        print(f"✓ Updated settings.py with domain: {self.domain}")
-        return True
-
-    def setup_docker_compose(self):
-        """Create and configure docker-compose.yml."""
-        print("\n[5/8] Setting up Docker Compose...")
+        if not self.email:
+            self.email = self.get_user_input(
+                "Enter your email (for SSL certificate): ",
+                validate_func=self.validate_email
+            )
         
-        docker_compose_content = f"""version: '3.8'
+        # Create .env file
+        env_path = os.path.join(self.install_dir, ".env")
+        env_content = f"""DEBUG=False
+SECRET_KEY=django-insecure-h-gx@tn3=o4a7z^&)sgd3pd4ov0$d2s-wj)n+_r)a=@q^7+r6n
+ALLOWED_HOSTS=localhost,127.0.0.1,{self.domain}
+DB_ENGINE=django.db.backends.postgresql
+DB_NAME={self.db_name}
+DB_USER={self.db_user}
+DB_PASSWORD={self.db_password}
+DB_HOST=db
+DB_PORT=5432
+"""
+        
+        with open(env_path, "w") as f:
+            f.write(env_content)
+        
+        print(f"✓ Created .env file with configuration")
+        
+        # Create docker-compose.yml
+        compose_path = os.path.join(self.install_dir, "docker-compose.yml")
+        compose_content = f"""version: '3'
+
 services:
   db:
-    image: postgres:16-bullseye
-    environment:
-      POSTGRES_DB: {self.db_name}
-      POSTGRES_USER: {self.db_user}
-      POSTGRES_PASSWORD: {self.db_password}
-      PGDATA: /var/lib/postgresql/data/pgdata
+    image: postgres:13
     volumes:
-      - postgres_data:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD", "pg_isready", "-U", "{self.db_user}"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
+      - postgres_data:/var/lib/postgresql/data/
+    environment:
+      - POSTGRES_USER={self.db_user}
+      - POSTGRES_PASSWORD={self.db_password}
+      - POSTGRES_DB={self.db_name}
+    restart: always
 
-  server:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    ports:
-      - 8000:8000
-    environment:
-      DATABASE_URL: "postgres://{self.db_user}:{self.db_password}@db:5432/{self.db_name}"
-      CSRF_TRUSTED_ORIGINS: "https://{self.domain},http://{self.domain}"
-      ALLOWED_HOSTS: "{self.domain},localhost,127.0.0.1,*"
-      DEBUG: "False"
-    depends_on:
-      db:
-        condition: service_healthy
+  web:
+    build: .
+    command: /bin/bash -c "python manage.py migrate && python manage.py runserver 0.0.0.0:8000"
     volumes:
-      - ./:/app/
-    command: bash -c "chmod +x /app/entrypoint.sh && /app/entrypoint.sh"
+      - ./:/code
+    ports:
+      - "8000:8000"
+    depends_on:
+      - db
+    restart: always
+    env_file:
+      - .env
 
 volumes:
   postgres_data:
 """
         
-        docker_compose_path = os.path.join(self.install_dir, "docker-compose.yml")
-        with open(docker_compose_path, "w") as f:
-            f.write(docker_compose_content)
-            
-        print("✓ Created docker-compose.yml")
+        with open(compose_path, "w") as f:
+            f.write(compose_content)
         
-        # Start Docker containers
-        print("Starting Docker containers...")
-        success, output = self.run_command("docker compose up -d", shell=True, cwd=self.install_dir)
-        if not success:
-            print(f"Failed to start Docker containers: {output}")
-            return False
-            
-        print("✓ Docker containers started")
-        return True
-
-    def configure_nginx(self):
-        """Configure Nginx as a reverse proxy."""
-        print("\n[6/8] Configuring Nginx...")
+        print(f"✓ Created docker-compose.yml file")
         
-        nginx_config = f"""server {{
+        # Configure Nginx
+        nginx_conf_path = "/etc/nginx/sites-available/horilla"
+        nginx_conf_content = f"""server {{
     listen 80;
     server_name {self.domain};
 
@@ -572,83 +545,125 @@ volumes:
 }}
 """
         
-        nginx_conf_path = "/etc/nginx/sites-available/horilla"
         with open(nginx_conf_path, "w") as f:
-            f.write(nginx_config)
-            
+            f.write(nginx_conf_content)
+        
         # Create symbolic link
-        if os.path.exists("/etc/nginx/sites-enabled/horilla"):
-            os.remove("/etc/nginx/sites-enabled/horilla")
-            
-        os.symlink(nginx_conf_path, "/etc/nginx/sites-enabled/horilla")
+        nginx_enabled_path = "/etc/nginx/sites-enabled/horilla"
+        if os.path.exists(nginx_enabled_path):
+            os.remove(nginx_enabled_path)
         
-        # Test and restart Nginx
-        success, output = self.run_command("nginx -t")
+        os.symlink(nginx_conf_path, nginx_enabled_path)
+        
+        # Test Nginx configuration
+        success, _ = self.run_command("nginx -t", shell=True)
         if not success:
-            print(f"Nginx configuration test failed: {output}")
-            return False
+            print("Warning: Nginx configuration test failed. This might cause issues later.")
+        
+        # Reload Nginx
+        self.run_command("systemctl reload nginx", shell=True)
+        
+        print(f"✓ Configured Nginx for {self.domain}")
+        
+        # Set up SSL with Let's Encrypt if domain is not using nip.io
+        if not self.domain.endswith('.nip.io'):
+            print(f"Setting up SSL certificate for {self.domain}...")
+            certbot_cmd = f"certbot --nginx -d {self.domain} --non-interactive --agree-tos -m {self.email}"
+            success, output = self.run_command(certbot_cmd, shell=True)
             
-        success, output = self.run_command("systemctl restart nginx")
-        if not success:
-            print(f"Failed to restart Nginx: {output}")
-            return False
-            
-        print("✓ Nginx configured successfully")
+            if success:
+                print(f"✓ SSL certificate installed for {self.domain}")
+            else:
+                print(f"Warning: Failed to install SSL certificate. HTTPS will not be available.")
+                print(f"Error: {output}")
+                print(f"You can manually set up SSL later with: {certbot_cmd}")
+        else:
+            print(f"Skipping SSL setup for .nip.io domain. HTTPS will not be available.")
+        
+        print("✓ Settings configured successfully")
         return True
 
-    def setup_ssl(self):
-        """Set up SSL with Let's Encrypt."""
-        print("\n[7/8] Setting up SSL with Let's Encrypt...")
+    def initialize_application(self):
+        """Initialize the application with an admin user."""
+        print("\n[5/8] Initializing application...")
         
-        # Get email if not provided
-        if not self.email:
-            self.email = self.get_user_input(
-                "Enter your email address for Let's Encrypt notifications: ",
-                validate_func=self.validate_email
-            )
-        
-        # Run certbot
-        cmd = f"certbot --nginx -d {self.domain} --non-interactive --agree-tos --email {self.email} --redirect"
-        success, output = self.run_command(cmd, shell=True)
-        if not success:
-            print(f"Failed to obtain SSL certificate: {output}")
-            print("This could be due to DNS not being properly configured or the domain not pointing to this server.")
-            print("You can try manually later with: certbot --nginx -d " + self.domain)
-            return False
-            
-        print("✓ SSL certificate obtained and configured")
-        return True
-
-    def initialize_horilla(self):
-        """Initialize Horilla and create admin user."""
-        print("\n[8/8] Initializing Horilla...")
-        
-        # Wait for the application to be ready
-        print("Waiting for the application to initialize (this may take a minute)...")
-        time.sleep(30)
-        
-        # Get admin credentials if not provided
+        # Get admin username and password if not already provided
         if not self.admin_username:
-            self.admin_username = self.get_user_input(
-                "Enter admin username [admin]: ",
-                default="admin"
-            )
-            
+            self.admin_username = self.get_user_input("Admin username: ", default="admin")
+        
         if not self.admin_password:
-            while True:
-                self.admin_password = self.get_user_input(
-                    "Enter admin password (min 8 characters): ",
-                    password=True
-                )
-                if len(self.admin_password) >= 8:
-                    break
-                print("Password must be at least 8 characters long.")
+            self.admin_password = self.get_user_input("Admin password: ", password=True, default="Admin@123")
         
-        # Create superuser
-        cmd = f'docker compose exec -T server python manage.py shell -c "from django.contrib.auth import get_user_model; User = get_user_model(); User.objects.create_superuser(\'{self.admin_username}\', \'admin@example.com\', \'{self.admin_password}\')" || true'
-        success, output = self.run_command(cmd, shell=True, cwd=self.install_dir)
+        # Create a script to create a superuser
+        create_admin_script = os.path.join(self.install_dir, "create_admin.py")
+        script_content = f"""
+import os
+import django
+
+os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'horilla.settings')
+django.setup()
+
+from django.contrib.auth.models import User
+
+username = '{self.admin_username}'
+password = '{self.admin_password}'
+email = '{self.email}'
+
+if User.objects.filter(username=username).exists():
+    print(f"User {{username}} already exists.")
+else:
+    User.objects.create_superuser(username=username, email=email, password=password)
+    print(f"Superuser {{username}} created successfully.")
+"""
         
-        print("✓ Horilla initialized")
+        with open(create_admin_script, "w") as f:
+            f.write(script_content)
+        
+        # Start the application with Docker Compose
+        print("Starting Docker containers...")
+        success, output = self.run_command("docker compose up -d", shell=True, cwd=self.install_dir)
+        
+        if not success:
+            print(f"Failed to start Docker containers: {output}")
+            return False
+        
+        # Wait for the database to be ready
+        print("Waiting for database to be ready...")
+        time.sleep(10)
+        
+        # Run migrations
+        print("Running database migrations...")
+        success, output = self.run_command("docker compose exec web python manage.py migrate", shell=True, cwd=self.install_dir)
+        
+        if not success:
+            print(f"Failed to run migrations: {output}")
+            return False
+        
+        # Create admin user
+        print(f"Creating admin user: {self.admin_username}")
+        success, output = self.run_command(
+            f"docker compose exec web python create_admin.py",
+            shell=True,
+            cwd=self.install_dir
+        )
+        
+        if not success:
+            print(f"Failed to create admin user: {output}")
+            return False
+        
+        # Collect static files
+        print("Collecting static files...")
+        success, output = self.run_command(
+            "docker compose exec web python manage.py collectstatic --noinput",
+            shell=True,
+            cwd=self.install_dir
+        )
+        
+        if not success:
+            print(f"Failed to collect static files: {output}")
+            return False
+        
+        print("✓ Application initialized successfully")
         return True
 
     def run(self):
@@ -662,10 +677,7 @@ volumes:
             self.install_dependencies,
             self.setup_horilla,
             self.configure_settings,
-            self.setup_docker_compose,
-            self.configure_nginx,
-            self.setup_ssl,
-            self.initialize_horilla
+            self.initialize_application
         ]
         
         for step in steps:
@@ -683,51 +695,68 @@ volumes:
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Horilla HRMS Automated Installation")
-    parser.add_argument("--domain", help="Domain name for Horilla (e.g., hrms.example.com)")
-    parser.add_argument("--email", help="Email address for Let's Encrypt notifications")
-    parser.add_argument("--install-dir", help="Installation directory (default: ~/horilla)")
-    parser.add_argument("--db-user", default="postgres", help="Database username")
-    parser.add_argument("--db-password", help="Database password")
-    parser.add_argument("--db-name", default="horilla", help="Database name")
+    """Main entry point for the installer."""
+    parser = argparse.ArgumentParser(description="Horilla HRMS Installer")
+    
+    # Required parameters (with defaults for non-interactive mode)
+    parser.add_argument("--domain", help="Domain name for Horilla HRMS")
+    parser.add_argument("--email", help="Email address for SSL certificates")
     parser.add_argument("--admin-username", help="Admin username")
     parser.add_argument("--admin-password", help="Admin password")
-    parser.add_argument("--non-interactive", action="store_true", help="Run in non-interactive mode (requires all parameters)")
-    parser.add_argument("--no-skip-upgrade", action="store_false", dest="skip_upgrade", help="Do not skip system upgrade (apt upgrade)")
-    parser.add_argument("--timeout", type=int, default=600, help="Command execution timeout in seconds (default: 600)")
-    parser.add_argument("--max-retries", type=int, default=5, help="Maximum number of retries for apt commands (default: 5)")
-    parser.add_argument("--retry-delay", type=int, default=10, help="Delay between retries in seconds (default: 10)")
-    parser.add_argument("--force-continue", action="store_true", help="Force continue even if apt is locked (use with caution)")
+    
+    # Optional parameters
+    parser.add_argument("--install-dir", default="/root/horilla", help="Installation directory")
+    parser.add_argument("--db-name", default="horilla", help="Database name")
+    parser.add_argument("--db-user", default="horilla", help="Database username")
+    parser.add_argument("--db-password", default="horilla", help="Database password")
+    parser.add_argument("--non-interactive", action="store_true", help="Run in non-interactive mode")
+    parser.add_argument("--force-continue", action="store_true", help="Continue installation even if apt is locked")
+    parser.add_argument("--skip-upgrade", action="store_true", help="Skip system upgrade")
     
     args = parser.parse_args()
     
-    # Validate non-interactive mode has all required parameters
-    if args.non_interactive and (not args.domain or not args.email or not args.admin_password):
-        print("Error: Non-interactive mode requires --domain, --email, and --admin-password")
-        sys.exit(1)
+    # Check if running in non-interactive mode
+    is_tty = sys.stdin.isatty()
+    if not is_tty and not args.non_interactive:
+        print("Detected non-interactive environment. Enabling force-continue mode automatically.")
+        args.non_interactive = True
+        args.force_continue = True
     
+    # Create and run the installer
     installer = HorillaInstaller(
         domain=args.domain,
         email=args.email,
-        install_dir=args.install_dir,
-        db_user=args.db_user,
-        db_password=args.db_password or "postgres",
-        db_name=args.db_name,
         admin_username=args.admin_username,
         admin_password=args.admin_password,
+        install_dir=args.install_dir,
+        db_name=args.db_name,
+        db_user=args.db_user,
+        db_password=args.db_password,
         non_interactive=args.non_interactive,
+        force_continue=args.force_continue,
         skip_upgrade=args.skip_upgrade,
-        timeout=args.timeout,
-        max_retries=args.max_retries,
-        retry_delay=args.retry_delay,
-        force_continue=args.force_continue
+        is_tty=is_tty
     )
     
-    if installer.run():
-        sys.exit(0)
+    success = installer.run()
+    
+    if success:
+        print("\n============================================================")
+        print("🎉 Horilla HRMS installed successfully! 🎉")
+        print("============================================================")
+        print(f"You can access your Horilla HRMS instance at: http://{installer.domain}")
+        if not installer.domain.endswith('.nip.io'):
+            print(f"or with HTTPS at: https://{installer.domain}")
+        print("\nAdmin credentials:")
+        print(f"  Username: {installer.admin_username}")
+        print(f"  Password: {installer.admin_password}")
+        print("\nIMPORTANT: For security reasons, please change the admin password after first login.")
+        print("============================================================")
+        return 0
     else:
-        sys.exit(1)
-
+        print("\n❌ Installation failed.")
+        print("Please check the error messages above and try again.")
+        return 1
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
