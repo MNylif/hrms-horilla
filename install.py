@@ -22,7 +22,8 @@ from pathlib import Path
 class HorillaInstaller:
     def __init__(self, domain=None, email=None, install_dir=None, 
                  db_user="postgres", db_password="postgres", db_name="horilla",
-                 admin_username=None, admin_password=None, non_interactive=False):
+                 admin_username=None, admin_password=None, non_interactive=False,
+                 skip_upgrade=True, timeout=600):
         """Initialize the installer with configuration parameters."""
         self.domain = domain
         self.email = email
@@ -33,19 +34,26 @@ class HorillaInstaller:
         self.admin_username = admin_username
         self.admin_password = admin_password
         self.non_interactive = non_interactive
+        self.skip_upgrade = skip_upgrade
+        self.timeout = timeout
         
         # Validate if running as root or with sudo
         if os.geteuid() != 0:
             print("This script must be run as root or with sudo privileges.")
             sys.exit(1)
 
-    def run_command(self, command, shell=False, cwd=None, env=None):
+    def run_command(self, command, shell=False, cwd=None, env=None, timeout=None):
         """Execute a shell command and return the output."""
+        if timeout is None:
+            timeout = self.timeout
+
         try:
             if isinstance(command, str) and not shell:
                 command = command.split()
             
-            result = subprocess.run(
+            print(f"Running command (timeout: {timeout}s): {command}")
+            
+            process = subprocess.Popen(
                 command,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
@@ -55,12 +63,20 @@ class HorillaInstaller:
                 env=env
             )
             
-            if result.returncode != 0:
-                print(f"Command failed: {command}")
-                print(f"Error: {result.stderr}")
-                return False, result.stderr
+            try:
+                stdout, stderr = process.communicate(timeout=timeout)
+                returncode = process.returncode
+            except subprocess.TimeoutExpired:
+                process.kill()
+                print(f"Command timed out after {timeout} seconds: {command}")
+                return False, "Command timed out"
             
-            return True, result.stdout
+            if returncode != 0:
+                print(f"Command failed with exit code {returncode}: {command}")
+                print(f"Error: {stderr}")
+                return False, stderr
+            
+            return True, stdout
         except Exception as e:
             print(f"Exception occurred: {e}")
             return False, str(e)
@@ -117,7 +133,7 @@ class HorillaInstaller:
         print("\n[1/8] Checking system requirements...")
         
         # Check if running on Ubuntu
-        success, output = self.run_command("lsb_release -is")
+        success, output = self.run_command("lsb_release -is", timeout=30)
         if not success or "Ubuntu" not in output:
             print("This script is designed for Ubuntu. Current OS:", output.strip() if success else "Unknown")
             return False
@@ -129,20 +145,37 @@ class HorillaInstaller:
         """Install required dependencies."""
         print("\n[2/8] Installing dependencies...")
         
+        # Update package index
+        print("Updating package index...")
+        success, output = self.run_command("apt-get update -y", shell=True, timeout=300)
+        if not success:
+            print(f"Failed to update package index: {output}")
+            return False
+        
+        # Skip apt upgrade if configured
+        if not self.skip_upgrade:
+            print("Upgrading system packages (this may take a while)...")
+            success, output = self.run_command("DEBIAN_FRONTEND=noninteractive apt-get upgrade -y -q", shell=True, timeout=600)
+            if not success:
+                print(f"Warning: System upgrade failed: {output}")
+                print("Continuing with installation...")
+        else:
+            print("Skipping system upgrade...")
+        
+        # Install required packages
         commands = [
-            "apt update && apt upgrade -y",
-            "apt install -y apt-transport-https ca-certificates curl software-properties-common",
+            "apt-get install -y apt-transport-https ca-certificates curl software-properties-common",
             "mkdir -p /etc/apt/keyrings",
             "curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg",
             'echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" | tee /etc/apt/sources.list.d/docker.list > /dev/null',
-            "apt update",
-            "apt install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin",
-            "apt install -y nginx certbot python3-certbot-nginx"
+            "apt-get update -y",
+            "apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin",
+            "apt-get install -y nginx certbot python3-certbot-nginx"
         ]
         
         for cmd in commands:
             print(f"Running: {cmd}")
-            success, output = self.run_command(cmd, shell=True)
+            success, output = self.run_command(cmd, shell=True, timeout=300)
             if not success:
                 print(f"Failed to execute: {cmd}")
                 print(f"Error: {output}")
@@ -403,6 +436,8 @@ def main():
     parser.add_argument("--admin-username", help="Admin username")
     parser.add_argument("--admin-password", help="Admin password")
     parser.add_argument("--non-interactive", action="store_true", help="Run in non-interactive mode (requires all parameters)")
+    parser.add_argument("--no-skip-upgrade", action="store_false", dest="skip_upgrade", help="Do not skip system upgrade (apt upgrade)")
+    parser.add_argument("--timeout", type=int, default=600, help="Command execution timeout in seconds (default: 600)")
     
     args = parser.parse_args()
     
@@ -420,7 +455,9 @@ def main():
         db_name=args.db_name,
         admin_username=args.admin_username,
         admin_password=args.admin_password,
-        non_interactive=args.non_interactive
+        non_interactive=args.non_interactive,
+        skip_upgrade=args.skip_upgrade,
+        timeout=args.timeout
     )
     
     if installer.run():

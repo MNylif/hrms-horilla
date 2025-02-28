@@ -13,13 +13,14 @@ fi
 echo "=== Horilla HRMS One-Line Installer ==="
 echo "This script will install Horilla HRMS on your system."
 echo "You will be prompted for necessary information during installation."
+echo "NOTE: The installation process may take 10-20 minutes depending on your system."
 echo ""
 
 # Install Python if not already installed
 if ! command -v python3 &> /dev/null; then
     echo "Python 3 not found. Installing..."
-    apt update
-    apt install -y python3 python3-pip
+    apt-get update
+    apt-get install -y python3 python3-pip
 fi
 
 # Create temporary directory
@@ -31,7 +32,7 @@ echo "Downloading installer..."
 curl -s -o install.py https://raw.githubusercontent.com/MNylif/hrms-horilla/main/install.py
 chmod +x install.py
 
-# Run the installer
+# Run the installer with all provided arguments
 echo "Starting installation..."
 python3 install.py "$@"
 

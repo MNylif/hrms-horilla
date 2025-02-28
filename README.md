@@ -15,6 +15,8 @@ During installation, you'll be prompted for:
 - Your email address (for SSL certificate)
 - Admin username and password
 
+The installation process may take 10-20 minutes depending on your system.
+
 ### Non-Interactive Installation
 
 For automated deployments, you can use the non-interactive mode:
@@ -28,11 +30,43 @@ sudo curl -s https://raw.githubusercontent.com/MNylif/hrms-horilla/main/install.
   --non-interactive
 ```
 
-Additional options:
+### Additional Options
+
+All these options can be added to either installation method:
+
 - `--install-dir`: Installation directory (default: ~/horilla)
 - `--db-user`: Database username (default: postgres)
 - `--db-password`: Database password (default: postgres)
 - `--db-name`: Database name (default: horilla)
+- `--timeout`: Command execution timeout in seconds (default: 600)
+- `--no-skip-upgrade`: Do not skip system upgrade (by default, apt upgrade is skipped)
+
+For example, to use a different database and increase command timeout:
+```bash
+sudo curl -s https://raw.githubusercontent.com/MNylif/hrms-horilla/main/install.sh | sudo bash -s -- \
+  --db-user horilla_user \
+  --db-password secure_password \
+  --db-name horilla_db \
+  --timeout 1200
+```
+
+### Troubleshooting
+
+If you encounter issues during installation:
+
+1. **Command timeouts**: By default, commands have a 10-minute timeout. If you're on a slow system, increase it with `--timeout 1200` (20 minutes)
+   
+2. **Package installation failures**: Try running these commands manually before installation:
+   ```bash
+   sudo apt-get update
+   sudo apt-get install -y apt-transport-https ca-certificates curl software-properties-common
+   ```
+
+3. **Network issues**: Ensure your server has stable internet access to download Docker and other components
+
+4. **Docker issues**: If Docker installation fails, try installing it manually following the [official instructions](https://docs.docker.com/engine/install/ubuntu/)
+
+5. **SSL certificate issues**: Ensure your domain is correctly pointed to your server's IP address before running the installer
 
 ## Manual Installation with Docker and SSL
 
