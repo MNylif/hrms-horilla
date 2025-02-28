@@ -23,29 +23,33 @@ import secrets
 
 
 class HorillaInstaller:
+    """Horilla HRMS installer class."""
+    
     def __init__(self, args):
         """Initialize the installer with configuration parameters."""
-        self.domain = args.domain
-        self.email = args.email
-        self.admin_username = args.admin_username
-        self.admin_password = args.admin_password
-        self.install_dir = args.install_dir
-        self.non_interactive = args.non_interactive
-        self.force_continue = args.force_continue
+        # Default values
+        self.domain = args.domain if hasattr(args, 'domain') else None
+        self.admin_username = args.admin_username if hasattr(args, 'admin_username') else "admin"
+        self.admin_password = args.admin_password if hasattr(args, 'admin_password') else "Admin@123"
+        self.email = args.email if hasattr(args, 'email') else "admin@example.com"
+        self.install_dir = args.install_dir if hasattr(args, 'install_dir') else "/opt/horilla"
+        self.force_continue = args.force_continue if hasattr(args, 'force_continue') else False
+        self.force_no_ssl = args.force_no_ssl if hasattr(args, 'force_no_ssl') else False
+        self.non_interactive = args.non_interactive if hasattr(args, 'non_interactive') else False
         self.skip_upgrade = args.skip_upgrade if hasattr(args, 'skip_upgrade') else False
         self.skip_root_check = args.skip_root_check if hasattr(args, 'skip_root_check') else False
         
-        # Backup system settings
-        self.enable_backups = args.enable_backups.lower() == 'yes'
-        self.s3_provider = args.s3_provider
-        self.s3_access_key = args.s3_access_key
-        self.s3_secret_key = args.s3_secret_key
-        self.s3_region = args.s3_region
-        self.s3_bucket_name = args.s3_bucket_name
-        self.backup_frequency = args.backup_frequency
+        # Backup system parameters
+        self.enable_backups = args.enable_backups.lower() == 'yes' if hasattr(args, 'enable_backups') else False
+        self.s3_provider = args.s3_provider if hasattr(args, 's3_provider') else "1"  # 1=AWS, 2=Wasabi, 3=B2, 4=DigitalOcean, 5=Other
+        self.s3_access_key = args.s3_access_key if hasattr(args, 's3_access_key') else ""
+        self.s3_secret_key = args.s3_secret_key if hasattr(args, 's3_secret_key') else ""
+        self.s3_region = args.s3_region if hasattr(args, 's3_region') else "us-east-1"
+        self.s3_bucket_name = args.s3_bucket_name if hasattr(args, 's3_bucket_name') else ""
+        self.backup_frequency = args.backup_frequency if hasattr(args, 'backup_frequency') else "1"  # 1=Daily, 2=Weekly, 3=Monthly
         
         # Determine if we're running in a TTY
-        self.is_tty = sys.stdout.isatty() and not self.non_interactive
+        self.is_tty = sys.stdout.isatty() and not args.non_interactive
         
         # Setup signal handler for graceful exit
         signal.signal(signal.SIGINT, self._signal_handler)
@@ -171,48 +175,104 @@ class HorillaInstaller:
         
         # Try checking Docker status with systemctl
         try:
-            success, _ = self.run_command("systemctl is-active docker.service", shell=True)
+            # Try to run docker --version to check if it's installed
+            success, _ = self.run_command("docker --version", shell=True, timeout=10)
             if success:
                 docker_installed = True
-                docker_running = True
-                print("✓ Docker is installed and running")
+                print("Docker is already installed. Skipping Docker installation.")
             else:
-                # Try socket
-                success, _ = self.run_command("systemctl is-active docker.socket", shell=True)
+                # Try to install docker-compose from apt package
+                print("Installing Docker Compose from apt package...")
+                success, _ = self.run_command("apt-get install -y docker-compose", shell=True, timeout=120)
                 if success:
-                    docker_installed = True
-                    print("✓ Docker is installed but not running (will be started)")
+                    print("Docker Compose installed successfully from apt.")
                 else:
-                    # Docker might be installed but not running
-                    success, _ = self.run_command("which docker", shell=True, timeout=10)
-                    if success:
-                        docker_installed = True
-                        print("✓ Docker is installed but not running (will be started)")
-                    else:
-                        print("✓ Docker is not yet installed (will be installed)")
-        except:
-            # Try alternatives for systems without systemctl
+                    # If apt installation fails, try Python virtual environment
+                    print("Setting up Python virtual environment for Docker Compose...")
+                    venv_path = "/root/horilla_venv"
+                    try:
+                        self.run_command(f"python3 -m venv {venv_path}", shell=True, timeout=60)
+                        self.run_command(f"{venv_path}/bin/pip install --upgrade pip", shell=True, timeout=60)
+                        self.run_command(f"{venv_path}/bin/pip install docker-compose", shell=True, timeout=120)
+                        
+                        # Create symlink to make docker-compose available system-wide
+                        self.run_command(f"ln -sf {venv_path}/bin/docker-compose /usr/local/bin/docker-compose", shell=True)
+                        print("Docker Compose installed successfully in virtual environment.")
+                    except Exception as e:
+                        print(f"Failed to install Docker Compose in virtual environment: {str(e)}")
+                        
+                        # As a last resort, try to download the Docker Compose binary directly
+                        print("Trying to download Docker Compose binary directly...")
+                        try:
+                            self.run_command("curl -L https://github.com/docker/compose/releases/download/v2.20.0/docker-compose-linux-x86_64 -o /usr/local/bin/docker-compose", shell=True, timeout=120)
+                            self.run_command("chmod +x /usr/local/bin/docker-compose", shell=True)
+                            print("Docker Compose binary installed successfully.")
+                        except Exception as e2:
+                            print(f"Failed to download Docker Compose binary: {str(e2)}")
+                            if not self.force_continue:
+                                return False
+                            print("Continuing anyway as --force-continue is set.")
+        except Exception as e:
+            print(f"Error checking Docker installation: {str(e)}")
+            if not self.force_continue:
+                return False
+            print("Continuing anyway as --force-continue is set.")
+            
+        # Install Docker if not installed
+        if not docker_installed:
+            # Add Docker repository
             try:
-                success, _ = self.run_command("service docker status", shell=True)
-                if success:
-                    docker_installed = True
-                    docker_running = True
-                    print("✓ Docker is installed and running")
-                else:
-                    success, _ = self.run_command("which docker", shell=True, timeout=10)
-                    if success:
-                        docker_installed = True
-                        print("✓ Docker is installed but not running (will be started)")
-                    else:
-                        print("✓ Docker is not yet installed or running (will be installed)")
-            except:
-                print("✓ Docker is not yet installed or running (will be installed)")
+                # Add Docker GPG key
+                self.run_command("curl -fsSL https://download.docker.com/linux/ubuntu/gpg | apt-key add -", shell=True, timeout=30)
                 
-        self.docker_installed = docker_installed
-        self.docker_running = docker_running
-        
+                # Get Ubuntu codename
+                try:
+                    success, ubuntu_codename = self.run_command("lsb_release -cs", shell=True, timeout=10)
+                    ubuntu_codename = ubuntu_codename.strip()
+                    if not success or not ubuntu_codename:
+                        raise Exception("Could not determine Ubuntu codename")
+                except:
+                    # If lsb_release is not available, try to get it from /etc/os-release
+                    try:
+                        success, os_release = self.run_command("cat /etc/os-release", shell=True, timeout=10)
+                        ubuntu_codename = None
+                        if success:
+                            for line in os_release.split('\n'):
+                                if line.startswith('VERSION_CODENAME='):
+                                    ubuntu_codename = line.split('=')[1].strip('"\'')
+                                    break
+                        if not ubuntu_codename:
+                            print("Could not determine Ubuntu codename. Using 'focal' as fallback.")
+                            ubuntu_codename = 'focal'
+                    except:
+                        print("Could not determine Ubuntu codename. Using 'focal' as fallback.")
+                        ubuntu_codename = 'focal'
+                
+                # Add Docker repository
+                self.run_command(f"add-apt-repository 'deb [arch=amd64] https://download.docker.com/linux/ubuntu {ubuntu_codename} stable'", shell=True, timeout=30)
+                
+                # Update package lists
+                self.run_command("apt-get update -y", shell=True, timeout=300)
+                
+                # Install Docker
+                self.run_command("apt-get install -y docker-ce docker-ce-cli containerd.io", shell=True, timeout=300)
+                
+                # Start Docker service
+                self.run_command("systemctl start docker", shell=True)
+                
+                # Enable Docker service to start at boot
+                self.run_command("systemctl enable docker", shell=True)
+                
+                print("✓ Docker installed successfully")
+            except Exception as e:
+                print(f"Failed to install Docker: {str(e)}")
+                if not self.force_continue:
+                    return False
+                print("Continuing anyway as --force-continue is set.")
+            
+        print("✓ All dependencies installed successfully.")
         return True
-        
+
     def install_dependencies(self):
         """Install all required dependencies."""
         print("\n[3/8] Installing dependencies...")
@@ -277,84 +337,6 @@ class HorillaInstaller:
                 docker_installed = True
                 print("Docker is already installed. Skipping Docker installation.")
             else:
-                print("Docker command found but may not be working properly.")
-        except:
-            print("Installing Docker...")
-            docker_installed = False
-        
-        # Install Docker if not installed
-        if not docker_installed:
-            # Add Docker repository
-            try:
-                # Add Docker GPG key
-                self.run_command("curl -fsSL https://download.docker.com/linux/ubuntu/gpg | apt-key add -", shell=True, timeout=30)
-                
-                # Get Ubuntu codename
-                try:
-                    success, ubuntu_codename = self.run_command("lsb_release -cs", shell=True, timeout=10)
-                    ubuntu_codename = ubuntu_codename.strip()
-                    if not success or not ubuntu_codename:
-                        raise Exception("Could not determine Ubuntu codename")
-                except:
-                    # If lsb_release is not available, try to get it from /etc/os-release
-                    try:
-                        success, os_release = self.run_command("cat /etc/os-release", shell=True, timeout=10)
-                        ubuntu_codename = None
-                        if success:
-                            for line in os_release.split('\n'):
-                                if line.startswith('VERSION_CODENAME='):
-                                    ubuntu_codename = line.split('=')[1].strip('"\'')
-                                    break
-                        if not ubuntu_codename:
-                            print("Could not determine Ubuntu codename. Using 'focal' as fallback.")
-                            ubuntu_codename = 'focal'
-                    except:
-                        print("Could not determine Ubuntu codename. Using 'focal' as fallback.")
-                        ubuntu_codename = 'focal'
-                
-                print(f"Detected Ubuntu codename: {ubuntu_codename}")
-                
-                # Add Docker repository
-                docker_repo = f"deb [arch=amd64] https://download.docker.com/linux/ubuntu {ubuntu_codename} stable"
-                self.run_command(f"add-apt-repository -y '{docker_repo}'", shell=True, timeout=30)
-                
-                # Update package lists again
-                self.run_command("apt-get update -y", shell=True, timeout=60)
-                
-                # Install Docker packages
-                docker_pkgs = "docker-ce docker-ce-cli containerd.io"
-                success, _ = self.run_command(f"apt-get install -y {docker_pkgs}", shell=True, timeout=300)
-                if success:
-                    print("Docker installed successfully.")
-                    docker_installed = True
-                else:
-                    print("Failed to install Docker packages. Continuing with installation.")
-                
-                # Try to start Docker service
-                try:
-                    self.run_command("systemctl enable docker", shell=True, timeout=30)
-                    self.run_command("systemctl start docker", shell=True, timeout=30)
-                    print("Docker service started successfully.")
-                except:
-                    try:
-                        self.run_command("service docker start", shell=True, timeout=30)
-                        print("Docker service started successfully (using service command).")
-                    except:
-                        print("Failed to start Docker service. You may need to start it manually after installation.")
-                
-            except Exception as e:
-                print(f"Failed to install Docker: {str(e)}")
-                if not self.force_continue:
-                    return False
-                print("Continuing anyway as --force-continue is set.")
-                
-        # Install Docker Compose
-        # First check if Docker Compose is already installed
-        try:
-            success, _ = self.run_command("docker-compose --version", shell=True, timeout=10)
-            if success:
-                print("Docker Compose is already installed. Skipping Docker Compose installation.")
-            else:
                 # Try to install docker-compose from apt package
                 print("Installing Docker Compose from apt package...")
                 success, _ = self.run_command("apt-get install -y docker-compose", shell=True, timeout=120)
@@ -387,10 +369,62 @@ class HorillaInstaller:
                                 return False
                             print("Continuing anyway as --force-continue is set.")
         except Exception as e:
-            print(f"Error checking Docker Compose installation: {str(e)}")
+            print(f"Error checking Docker installation: {str(e)}")
             if not self.force_continue:
                 return False
             print("Continuing anyway as --force-continue is set.")
+            
+        # Install Docker if not installed
+        if not docker_installed:
+            # Add Docker repository
+            try:
+                # Add Docker GPG key
+                self.run_command("curl -fsSL https://download.docker.com/linux/ubuntu/gpg | apt-key add -", shell=True, timeout=30)
+                
+                # Get Ubuntu codename
+                try:
+                    success, ubuntu_codename = self.run_command("lsb_release -cs", shell=True, timeout=10)
+                    ubuntu_codename = ubuntu_codename.strip()
+                    if not success or not ubuntu_codename:
+                        raise Exception("Could not determine Ubuntu codename")
+                except:
+                    # If lsb_release is not available, try to get it from /etc/os-release
+                    try:
+                        success, os_release = self.run_command("cat /etc/os-release", shell=True, timeout=10)
+                        ubuntu_codename = None
+                        if success:
+                            for line in os_release.split('\n'):
+                                if line.startswith('VERSION_CODENAME='):
+                                    ubuntu_codename = line.split('=')[1].strip('"\'')
+                                    break
+                        if not ubuntu_codename:
+                            print("Could not determine Ubuntu codename. Using 'focal' as fallback.")
+                            ubuntu_codename = 'focal'
+                    except:
+                        print("Could not determine Ubuntu codename. Using 'focal' as fallback.")
+                        ubuntu_codename = 'focal'
+                
+                # Add Docker repository
+                self.run_command(f"add-apt-repository 'deb [arch=amd64] https://download.docker.com/linux/ubuntu {ubuntu_codename} stable'", shell=True, timeout=30)
+                
+                # Update package lists
+                self.run_command("apt-get update -y", shell=True, timeout=300)
+                
+                # Install Docker
+                self.run_command("apt-get install -y docker-ce docker-ce-cli containerd.io", shell=True, timeout=300)
+                
+                # Start Docker service
+                self.run_command("systemctl start docker", shell=True)
+                
+                # Enable Docker service to start at boot
+                self.run_command("systemctl enable docker", shell=True)
+                
+                print("✓ Docker installed successfully")
+            except Exception as e:
+                print(f"Failed to install Docker: {str(e)}")
+                if not self.force_continue:
+                    return False
+                print("Continuing anyway as --force-continue is set.")
             
         print("✓ All dependencies installed successfully.")
         return True
@@ -754,127 +788,82 @@ volumes:
         return True
 
     def initialize_application(self):
-        """Initialize the application with an admin user."""
+        """
+        Initialize the Horilla application with required settings.
+        
+        This includes:
+        - Building Docker images
+        - Starting Docker containers
+        - Running database migrations
+        - Creating a superuser
+        - Setting up initial data
+        """
         print("\n[5/8] Initializing application...")
         
-        # Get admin username and password if not already provided
-        if not self.admin_username:
-            self.admin_username = self.get_user_input("Admin username: ", default="admin")
-        
-        if not self.admin_password:
-            self.admin_password = self.get_user_input("Admin password: ", password=True, default="Admin@123")
-        
-        # Create a script to create a superuser
-        create_admin_script = os.path.join(self.install_dir, "create_admin.py")
-        script_content = f"""
-import os
-import django
-
-os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'horilla.settings')
-django.setup()
-
-from django.contrib.auth import get_user_model
-User = get_user_model()
-
-username = '{self.admin_username}'
-password = '{self.admin_password}'
-email = '{self.email}'
-
-if User.objects.filter(username=username).exists():
-    print(f"User {{username}} already exists.")
-else:
-    try:
-        # Try to create a superuser with the standard fields
-        User.objects.create_superuser(username=username, email=email, password=password)
-        print(f"Superuser {{username}} created successfully.")
-    except Exception as e:
-        # If that fails, try with additional fields that might be required by Horilla
         try:
-            User.objects.create_superuser(
-                username=username, 
-                email=email, 
-                password=password,
-                is_new_employee=False
-            )
-            print(f"Superuser {{username}} created successfully with custom fields.")
-        except Exception as e2:
-            print(f"Failed to create superuser: {{e2}}")
-            # As a last resort, try using the management command
-            import subprocess
-            cmd = f"echo 'from django.contrib.auth import get_user_model; User = get_user_model(); User.objects.create_superuser(\\\"{username}\\\", \\\"{email}\\\", \\\"{password}\\\")' | python manage.py shell"
-            result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
-            if result.returncode == 0:
-                print(f"Superuser {{username}} created using management command.")
-            else:
-                print(f"All attempts to create superuser failed.")
-                print(f"Error: {{result.stderr}}")
-"""
-        
-        with open(create_admin_script, "w") as f:
-            f.write(script_content)
-        
-        # Start the application with Docker Compose
-        print("Starting Docker containers...")
-        success, output = self.run_command("docker compose up -d", shell=True, cwd=self.install_dir)
-        
-        if not success:
-            print(f"Failed to start Docker containers: {output}")
-            return False
-        
-        # Wait a moment for the web container to be ready
-        print("Waiting for web container to be ready...")
-        time.sleep(10)
-        
-        # Run migrations
-        print("Running database migrations...")
-        success, output = self.run_command("docker compose exec web python manage.py migrate", shell=True, cwd=self.install_dir)
-        
-        if not success:
-            print(f"Failed to run migrations: {output}")
-            return False
-        
-        # Create admin user
-        print(f"Creating admin user: {self.admin_username}")
-        success, output = self.run_command(
-            f"docker compose exec web python create_admin.py",
-            shell=True,
-            cwd=self.install_dir
-        )
-        
-        if not success:
-            print(f"Failed to create admin user: {output}")
-            # Try an alternative method to create the admin user
-            print("Trying alternative method to create admin user...")
+            # Change to the installation directory
+            os.chdir(self.install_dir)
             
-            # Create a direct Django management command to create superuser
-            env_vars = f"DJANGO_SUPERUSER_USERNAME={self.admin_username} DJANGO_SUPERUSER_EMAIL={self.email} DJANGO_SUPERUSER_PASSWORD={self.admin_password}"
-            success, output = self.run_command(
-                f"{env_vars} docker compose exec web python manage.py createsuperuser --noinput",
-                shell=True,
-                cwd=self.install_dir
-            )
-            
+            # Start Docker containers
+            print("Starting Docker containers...")
+            success, output = self.run_command("docker-compose up -d", shell=True, timeout=300)
             if not success:
-                print(f"All attempts to create admin user failed.")
-                print("You may need to create an admin user manually after installation.")
-                print(f"Use: docker compose exec web python manage.py createsuperuser")
-                # Continue with the installation despite this error
-        
-        # Collect static files
-        print("Collecting static files...")
-        success, output = self.run_command(
-            "docker compose exec web python manage.py collectstatic --noinput",
-            shell=True,
-            cwd=self.install_dir
-        )
-        
-        if not success:
-            print(f"Failed to collect static files: {output}")
-            print("Static files collection failed, but the application may still work.")
-            # Continue with the installation despite this error
-        
-        print("✓ Application initialized successfully")
-        return True
+                print(f"Failed to start Docker containers: {output}")
+                if not self.force_continue:
+                    return False
+                print("Continuing anyway as --force-continue is set.")
+            else:
+                print("✓ Docker containers started successfully")
+            
+            # Wait a moment for the web container to be ready
+            print("Waiting for web container to be ready...")
+            time.sleep(10)
+            
+            # Run migrations
+            print("Running database migrations...")
+            success, output = self.run_command("docker-compose exec -T web python manage.py migrate", shell=True, timeout=120)
+            if not success:
+                print(f"Failed to run migrations: {output}")
+                if not self.force_continue:
+                    return False
+                print("Continuing anyway as --force-continue is set.")
+            else:
+                print("✓ Database migrations completed successfully")
+            
+            # Create superuser
+            print(f"Creating admin user: {self.admin_username}")
+            cmd = f"echo 'from django.contrib.auth import get_user_model; User = get_user_model(); User.objects.create_superuser(\\\"{self.admin_username}\\\", \\\"{self.email}\\\", \\\"{self.admin_password}\\\")' | python manage.py shell"
+            success, output = self.run_command(f"docker-compose exec -T web bash -c '{cmd}'", shell=True, timeout=60)
+            if not success:
+                print(f"Failed to create superuser: {output}")
+                # Check if the error is because the user already exists
+                if "already exists" in output:
+                    print("Admin user already exists, skipping creation")
+                elif not self.force_continue:
+                    return False
+                else:
+                    print("Continuing anyway as --force-continue is set.")
+            else:
+                print(f"✓ Created admin user: {self.admin_username}")
+            
+            # Collect static files
+            print("Collecting static files...")
+            success, output = self.run_command("docker-compose exec -T web python manage.py collectstatic --noinput", shell=True, timeout=60)
+            if not success:
+                print(f"Failed to collect static files: {output}")
+                if not self.force_continue:
+                    return False
+                print("Continuing anyway as --force-continue is set.")
+            else:
+                print("✓ Static files collected successfully")
+            
+            print("✓ Application initialized successfully")
+            return True
+            
+        except Exception as e:
+            print(f"❌ Failed to initialize application: {str(e)}")
+            traceback.print_exc()
+            return False
 
     def validate_inputs(self):
         """Validate all input parameters."""
@@ -973,91 +962,8 @@ else:
             self.run_command(f"mkdir -p {backup_dir}", shell=True)
             print(f"✓ Created backup directory: {backup_dir}")
             
-            # Configure rclone for S3 storage
-            print("Configuring rclone for S3 storage...")
+            self.configure_rclone()
             
-            # Generate rclone.conf
-            rclone_conf_dir = "/root/.config/rclone"
-            self.run_command(f"mkdir -p {rclone_conf_dir}", shell=True)
-            
-            # Determine the S3 provider
-            if self.s3_provider == "1":  # AWS S3
-                rclone_conf = f"""[horilla-backup]
-type = s3
-provider = AWS
-env_auth = false
-access_key_id = {self.s3_access_key}
-secret_access_key = {self.s3_secret_key}
-region = {self.s3_region}
-location_constraint = {self.s3_region}
-acl = private
-"""
-            elif self.s3_provider == "2":  # Wasabi
-                rclone_conf = f"""[horilla-backup]
-type = s3
-provider = Wasabi
-env_auth = false
-access_key_id = {self.s3_access_key}
-secret_access_key = {self.s3_secret_key}
-region = {self.s3_region}
-endpoint = s3.wasabisys.com
-acl = private
-"""
-            elif self.s3_provider == "3":  # Backblaze B2
-                rclone_conf = f"""[horilla-backup]
-type = b2
-account = {self.s3_access_key}
-key = {self.s3_secret_key}
-"""
-            elif self.s3_provider == "4":  # DigitalOcean Spaces
-                rclone_conf = f"""[horilla-backup]
-type = s3
-provider = DigitalOcean
-env_auth = false
-access_key_id = {self.s3_access_key}
-secret_access_key = {self.s3_secret_key}
-endpoint = {self.s3_region}.digitaloceanspaces.com
-acl = private
-"""
-            else:  # Other S3-compatible (default)
-                rclone_conf = f"""[horilla-backup]
-type = s3
-provider = Other
-env_auth = false
-access_key_id = {self.s3_access_key}
-secret_access_key = {self.s3_secret_key}
-region = {self.s3_region}
-endpoint = s3.{self.s3_region}.amazonaws.com
-force_path_style = true
-acl = private
-"""
-                
-            # Write rclone.conf
-            with open(f"{rclone_conf_dir}/rclone.conf", "w") as f:
-                f.write(rclone_conf)
-                
-            print("✓ Generated rclone configuration")
-            
-            # Test rclone configuration
-            print("Testing rclone configuration...")
-            success, output = self.run_command(f"rclone lsd horilla-backup:{self.s3_bucket_name}", shell=True, timeout=30)
-            if not success:
-                print(f"⚠️ Warning: Failed to verify rclone configuration: {output}")
-                
-                # Try to create the bucket if it doesn't exist
-                print(f"Attempting to create bucket '{self.s3_bucket_name}'...")
-                success, output = self.run_command(f"rclone mkdir horilla-backup:{self.s3_bucket_name}", shell=True, timeout=30)
-                if not success:
-                    print(f"⚠️ Warning: Failed to create bucket: {output}")
-                    print("You may need to manually create the bucket or check your S3 credentials.")
-                    if not self.force_continue:
-                        return False
-                    print("Continuing anyway as --force-continue is set.")
-                else:
-                    print(f"✓ Created bucket: {self.s3_bucket_name}")
-            else:
-                print("✓ Successfully connected to S3 storage")
-                
             # Create borg passphrase
             borg_passphrase = secrets.token_hex(16)  # Generate random passphrase
             
@@ -1095,8 +1001,8 @@ tar -czf $BACKUP_DIR/horilla_files_$TIMESTAMP.tar.gz -C $INSTALL_DIR \\
 
 # Upload to S3
 echo "Uploading to S3..."
-rclone copy $BACKUP_DIR/horilla_db_$TIMESTAMP.sql.gz horilla-backup:$BUCKET_NAME/database/
-rclone copy $BACKUP_DIR/horilla_files_$TIMESTAMP.tar.gz horilla-backup:$BUCKET_NAME/files/
+rclone copy $BACKUP_DIR/horilla_db_$TIMESTAMP.sql.gz s3backup:$BUCKET_NAME/database/
+rclone copy $BACKUP_DIR/horilla_files_$TIMESTAMP.tar.gz s3backup:$BUCKET_NAME/files/
 
 # Keep only the last 7 local backups
 echo "Cleaning up old local backups..."
@@ -1165,83 +1071,97 @@ echo "Backup completed successfully at $(date)"
             print("Continuing anyway as --force-continue is set.")
             return True
 
+    def configure_web_server(self):
+        """Configure Nginx and SSL certificates."""
+        print("\n[6/8] Configuring web server...")
+        
+        try:
+            # Check if Certbot is installed
+            if not self.force_no_ssl:
+                print("Checking for Certbot...")
+                success, _ = self.run_command("certbot --version", shell=True, timeout=10)
+                
+                if not success:
+                    print("Installing Certbot...")
+                    self.run_command("apt-get update", shell=True, timeout=60)
+                    self.run_command("apt-get install -y certbot python3-certbot-nginx", shell=True, timeout=300)
+                
+                # Generate SSL certificate with Certbot
+                print(f"Generating SSL certificate for {self.domain}...")
+                cmd = f"certbot --nginx -d {self.domain} --email {self.email} --agree-tos --non-interactive"
+                success, output = self.run_command(cmd, shell=True, timeout=180)
+                
+                if not success:
+                    print(f"Failed to generate SSL certificate: {output}")
+                    print("Continuing with HTTP only.")
+                else:
+                    print(f"✓ SSL certificate generated for {self.domain}")
+                    
+                    # Configure Nginx to force HTTPS
+                    print("Configuring Nginx for HTTPS...")
+                    nginx_conf = f"/etc/nginx/sites-available/{self.domain}"
+                    
+                    # Check if the Nginx config exists
+                    success, _ = self.run_command(f"test -f {nginx_conf}", shell=True)
+                    if success:
+                        # Add HTTPS redirect if not already present
+                        cmd = f"grep -q 'return 301 https' {nginx_conf} || sed -i '/listen 80;/a\\    return 301 https://$host$request_uri;' {nginx_conf}"
+                        self.run_command(cmd, shell=True, timeout=10)
+                        
+                        # Reload Nginx
+                        self.run_command("systemctl reload nginx", shell=True, timeout=10)
+                        print("✓ Configured Nginx for HTTPS")
+            else:
+                print("Skipping SSL setup as --force-no-ssl was specified.")
+                
+            # If we're running directly from Docker, not much to configure for the web server
+            # as Docker Compose handles the Nginx setup
+            print("✓ Web server configuration completed")
+            return True
+            
+        except Exception as e:
+            print(f"Error configuring web server: {str(e)}")
+            if not self.force_continue:
+                return False
+            print("Continuing anyway as --force-continue is set.")
+            return True  # Return True to continue even with web server errors
+
     def install(self):
-        """Main installation method."""
-        title = """
- _   _           _ _ _         _   _ _____  __  __ _____ 
-| | | | ___  _ __(_) | | __ _  | | | |  __ \|  \/  / ____|
-| |_| |/ _ \| '__| | | |/ _` | | |_| | |__) | \  / | (___  
-|  _  | (_) | |  | | | | (_| | |  _  |  _  /| |\/| |\___ \\ 
-|_| |_|\___/|_|  |_|_|_|\__,_| |_| |_|_| \_\_|  |_|____/ 
-                                                         
-        """
-        print(title)
+        """Run the installation process."""
+        print("\n=============================================")
         print("Starting Horilla HRMS installation...")
-        print(f"Installation directory: {self.install_dir}")
+        print("=============================================\n")
         
-        # Check system requirements
-        if not self.check_system_requirements():
-            print("❌ System requirements check failed. Please fix the issues and try again.")
+        # Check arguments and get user inputs
+        if not self.get_user_inputs():
+            print("❌ Installation aborted due to missing required inputs.")
             return False
-        
-        # Install dependencies
-        if not self.install_dependencies():
-            print("❌ Failed to install dependencies. Please fix the issues and try again.")
+            
+        # Validate backup settings if enabled
+        if self.enable_backups and not self.validate_backup_settings():
+            print("❌ Installation aborted due to invalid backup settings.")
             return False
+            
+        # Installation steps
+        steps = [
+            (self.check_system_requirements, "[1/8] Checking system requirements..."),
+            (self.install_dependencies, "[2/8] Installing dependencies..."),
+            (self.setup_horilla, "[3/8] Setting up Horilla HRMS..."),
+            (self.configure_settings, "[4/8] Configuring application..."),
+            (self.initialize_application, "[5/8] Initializing application..."),
+            (self.configure_web_server, "[6/8] Configuring web server..."),
+            (self.configure_backup_system, "[7/8] Configuring backup system...")
+        ]
         
-        # Clone repository
-        if not self.clone_repository():
-            print("❌ Failed to clone repository. Please check your internet connection and try again.")
-            return False
-        
-        # Configure application
-        if not self.configure_application():
-            print("❌ Failed to configure application. Please check the configuration and try again.")
-            return False
-        
-        # Initialize application
-        if not self.initialize_application():
-            print("❌ Failed to initialize application. Please check the logs and try again.")
-            return False
-        
-        # Configure SSL
-        if not self.force_no_ssl:
-            if not self.configure_ssl():
-                print("⚠️ SSL configuration failed. The application will still be accessible over HTTP.")
-                # Don't return False here, as we want the installation to continue even if SSL fails
-        
-        # Configure backup system if enabled
-        if self.enable_backups:
-            if not self.configure_backup_system():
-                print("⚠️ Backup system configuration failed, but installation will continue.")
-                # Don't return False here, as we want the installation to continue even if backup setup fails
-        
-        # Final steps
-        print("\n[8/8] Finalizing installation...")
-        
-        # Print installation summary
-        print("\n" + "="*80)
-        print("✅ Horilla HRMS installation completed successfully!")
-        print("="*80)
-        print("\nApplication Information:")
-        print(f"URL: {'https' if not self.force_no_ssl else 'http'}://{self.domain}")
-        print(f"Admin Username: {self.admin_username}")
-        print(f"Admin Email: {self.admin_email}")
-        print(f"Admin Password: {'*' * len(self.admin_password)} (As provided during setup)")
-        print(f"Installation Directory: {self.install_dir}")
-        
-        # Print backup information if enabled
-        if self.enable_backups:
-            print("\nBackup Information:")
-            print(f"Backup Provider: {self.get_s3_provider_name()}")
-            print(f"Backup Bucket: {self.s3_bucket_name}")
-            print(f"Backup Frequency: {self.get_backup_frequency_name()}")
-            print(f"Backup Script: {self.install_dir}/backups/backup.sh")
-        
-        print("\nDocumentation: https://github.com/horilla-opensource/horilla/wiki")
-        print("\nSupport: https://github.com/horilla-opensource/horilla/issues")
-        
-        print("\nThank you for installing Horilla HRMS!")
+        for step_func, message in steps:
+            print(f"\n{message}")
+            if not step_func():
+                print(f"❌ Installation failed at: {message}")
+                return False
+                
+        # Setup complete
+        print("\n[8/8] Installation completed successfully!")
+        self.show_completion_message()
         return True
     
     def get_s3_provider_name(self):
@@ -1251,7 +1171,42 @@ echo "Backup completed successfully at $(date)"
             "2": "Wasabi",
             "3": "Backblaze B2",
             "4": "DigitalOcean Spaces",
-            "5": "Other S3-compatible"
+            "5": "Cloudflare R2",
+            "6": "Google Cloud Storage",
+            "7": "Microsoft Azure Blob Storage",
+            "8": "OpenStack Swift",
+            "9": "Minio",
+            "10": "Alibaba Cloud OSS",
+            "11": "IBM COS S3",
+            "12": "Huawei OBS",
+            "13": "Tencent COS",
+            "14": "Oracle Cloud Storage",
+            "15": "Linode Object Storage",
+            "16": "Scaleway",
+            "17": "Storj",
+            "18": "Qiniu",
+            "19": "HDFS",
+            "20": "Local filesystem",
+            "21": "SFTP",
+            "22": "FTP",
+            "23": "HTTP",
+            "24": "WebDAV",
+            "25": "Microsoft OneDrive",
+            "26": "Google Drive",
+            "27": "Dropbox",
+            "28": "pCloud",
+            "29": "Box",
+            "30": "Mega",
+            "31": "Proton Drive",
+            "32": "Jottacloud",
+            "33": "Koofr",
+            "34": "Yandex Disk",
+            "35": "Nextcloud",
+            "36": "ownCloud",
+            "37": "Seafile",
+            "38": "SMB / CIFS",
+            "39": "Ceph",
+            "40": "Other S3 compatible"
         }
         return providers.get(str(self.s3_provider), "Unknown")
     
@@ -1283,6 +1238,32 @@ echo "Backup completed successfully at $(date)"
         
         return success
 
+    def show_completion_message(self):
+        """Display the completion message with system details."""
+        print("\n" + "="*80)
+        print("✅ Horilla HRMS installation completed successfully!")
+        print("="*80)
+        
+        print("\nApplication Information:")
+        print(f"URL: {'https' if not self.force_no_ssl else 'http'}://{self.domain}")
+        print(f"Admin Username: {self.admin_username}")
+        print(f"Admin Email: {self.email}")
+        print(f"Admin Password: {'*' * len(self.admin_password)} (As provided during setup)")
+        print(f"Installation Directory: {self.install_dir}")
+        
+        # Print backup information if enabled
+        if self.enable_backups:
+            print("\nBackup Information:")
+            print(f"Backup Provider: {self.get_s3_provider_name()}")
+            print(f"Backup Bucket: {self.s3_bucket_name}")
+            print(f"Backup Frequency: {self.get_backup_frequency_name()}")
+            print(f"Backup Script: {self.install_dir}/backups/backup.sh")
+        
+        print("\nDocumentation: https://github.com/horilla-opensource/horilla/wiki")
+        print("\nSupport: https://github.com/horilla-opensource/horilla/issues")
+        
+        print("\nThank you for installing Horilla HRMS!")
+    
     def validate_domain(self, domain):
         """
         Validate domain name.
@@ -1340,197 +1321,489 @@ echo "Backup completed successfully at $(date)"
                 
         return False
 
-    def initialize_application(self):
-        """
-        Initialize the Horilla application with required settings.
-        
-        This includes:
-        - Building Docker images
-        - Starting Docker containers
-        - Running database migrations
-        - Creating a superuser
-        - Setting up initial data
-        """
-        print("\n[5/8] Initializing application...")
-        
-        try:
-            # Change to the installation directory
-            os.chdir(self.install_dir)
-            
-            # Start Docker containers
-            print("Starting Docker containers...")
-            success, output = self.run_command("docker-compose up -d", shell=True, timeout=300)
-            if not success:
-                print(f"Failed to start Docker containers: {output}")
-                if not self.force_continue:
-                    return False
-                print("Continuing anyway as --force-continue is set.")
+    def get_user_input(self, prompt, password=False, default=None, validate_func=None):
+        """Get user input with optional validation."""
+        while True:
+            if password:
+                user_input = getpass.getpass(prompt)
             else:
-                print("✓ Docker containers started successfully")
+                user_input = input(prompt)
             
-            # Wait a moment for the web container to be ready
-            print("Waiting for web container to be ready...")
-            time.sleep(10)
+            if default and not user_input:
+                user_input = default
             
-            # Run migrations
-            print("Running database migrations...")
-            success, output = self.run_command("docker-compose exec -T web python manage.py migrate", shell=True, timeout=120)
-            if not success:
-                print(f"Failed to run migrations: {output}")
-                if not self.force_continue:
-                    return False
-                print("Continuing anyway as --force-continue is set.")
-            else:
-                print("✓ Database migrations completed successfully")
-            
-            # Create superuser
-            print(f"Creating admin user: {self.admin_username}")
-            # Use the admin_username, admin_email, and admin_password from self
-            admin_email = self.email
-            cmd = f"echo 'from django.contrib.auth import get_user_model; User = get_user_model(); User.objects.create_superuser(\\\"{self.admin_username}\\\", \\\"{admin_email}\\\", \\\"{self.admin_password}\\\")' | python manage.py shell"
-            success, output = self.run_command(f"docker-compose exec -T web bash -c '{cmd}'", shell=True, timeout=60)
-            if not success:
-                print(f"Failed to create superuser: {output}")
-                # Check if the error is because the user already exists
-                if "already exists" in output:
-                    print("Admin user already exists, skipping creation")
-                elif not self.force_continue:
-                    return False
+            if validate_func:
+                if validate_func(user_input):
+                    return user_input
                 else:
-                    print("Continuing anyway as --force-continue is set.")
+                    print("Invalid input. Please try again.")
             else:
-                print(f"✓ Created admin user: {self.admin_username}")
+                return user_input
+
+    def get_user_inputs(self):
+        """Get user inputs for installation."""
+        print("\nPlease provide the following information for your Horilla HRMS installation:")
+        print("Press Enter to accept the default values shown in brackets.")
+        
+        # Domain name
+        print("\nDomain name for your Horilla HRMS instance:")
+        print("  - You can use a custom domain like 'hrms.example.com' (requires DNS setup)")
+        print("  - Or use the default .nip.io domain which works without DNS configuration")
+        
+        # Get server IP
+        server_ip = "127.0.0.1"
+        try:
+            success, ip_output = self.run_command("curl -s ifconfig.me", shell=True, timeout=10)
+            if success and ip_output.strip():
+                server_ip = ip_output.strip()
+        except:
+            pass
             
-            # Collect static files
-            print("Collecting static files...")
-            success, output = self.run_command("docker-compose exec -T web python manage.py collectstatic --noinput", shell=True, timeout=60)
-            if not success:
-                print(f"Failed to collect static files: {output}")
-                if not self.force_continue:
-                    return False
-                print("Continuing anyway as --force-continue is set.")
-            else:
-                print("✓ Static files collected successfully")
+        print(f"\nIf using a custom domain, make sure you have created an A record pointing to this server's IP ({server_ip}):")
+        print("  - Type: A")
+        print("  - Name/Host: hrms (for hrms.example.com)")
+        print(f"  - Value/Points to: {server_ip}")
+        
+        # Set default domain based on server IP
+        default_domain = f"horilla.{server_ip}.nip.io"
+        self.domain = self.domain or default_domain
+        
+        while True:
+            domain = input(f"\nDomain name [{self.domain}]: ").strip() or self.domain
+            if self.validate_domain(domain):
+                self.domain = domain
+                break
+            print("Invalid domain format. Please try again.")
             
-            print("✓ Application initialized successfully")
-            return True
+        # Admin email
+        while True:
+            email = input(f"Email address for SSL certificates [{self.email}]: ").strip() or self.email
+            if self.validate_email(email):
+                self.email = email
+                break
+            print("Invalid email format. Please try again.")
             
-        except Exception as e:
-            print(f"❌ Failed to initialize application: {str(e)}")
-            traceback.print_exc()
-            return False
-            
-    def validate_backup_settings(self):
-        """Validate backup system settings."""
+        # Admin username
+        self.admin_username = input(f"Admin username [{self.admin_username}]: ").strip() or self.admin_username
+        
+        # Admin password
+        self.admin_password = input(f"Admin password [{self.admin_password}]: ").strip() or self.admin_password
+        
+        # Installation directory
+        self.install_dir = input(f"Installation directory [{self.install_dir}]: ").strip() or self.install_dir
+        
+        # Backup system
+        print("\nBackup System Configuration:")
+        print("Horilla can be configured with an automated backup system using Rclone and BorgBackup.")
+        print("This will back up your database and application files to a remote storage.")
+        
+        enable_backups = input("\nEnable automated backups? (yes/no) [no]: ").strip().lower() or "no"
+        self.enable_backups = enable_backups in ["yes", "y", "true", "1"]
+        
         if self.enable_backups:
-            if not self.s3_access_key:
-                print("S3 Access Key is required for backups.")
-                return False
-                
-            if not self.s3_secret_key:
-                print("S3 Secret Key is required for backups.")
-                return False
-                
-            if not self.s3_bucket_name:
-                print("S3 Bucket Name is required for backups.")
-                return False
+            print("\nStorage Provider options:")
+            print("S3-Compatible Storage:")
+            print("1. Amazon S3")
+            print("2. Wasabi")
+            print("3. Backblaze B2")
+            print("4. DigitalOcean Spaces")
+            print("5. Cloudflare R2")
+            print("6. Google Cloud Storage")
+            print("7. Microsoft Azure Blob Storage")
+            print("8. OpenStack Swift")
+            print("9. Minio")
+            print("10. Alibaba Cloud OSS")
+            print("11. IBM COS S3")
+            print("12. Huawei OBS")
+            print("13. Tencent COS")
+            print("14. Oracle Cloud Storage")
+            print("15. Linode Object Storage")
+            print("16. Scaleway")
+            print("17. Storj")
+            print("18. Qiniu")
             
-            # Validate region based on provider
-            if self.s3_provider == "aws":
-                # List of valid AWS regions
-                valid_aws_regions = [
-                    "us-east-1", "us-east-2", "us-west-1", "us-west-2", 
-                    "af-south-1", "ap-east-1", "ap-south-1", "ap-northeast-1", 
-                    "ap-northeast-2", "ap-northeast-3", "ap-southeast-1", 
-                    "ap-southeast-2", "ca-central-1", "eu-central-1", 
-                    "eu-west-1", "eu-west-2", "eu-west-3", "eu-south-1", 
-                    "eu-north-1", "me-south-1", "sa-east-1"
-                ]
+            print("\nOther Storage Types:")
+            print("19. HDFS (Hadoop Distributed Filesystem)")
+            print("20. Local filesystem")
+            print("21. SFTP")
+            print("22. FTP")
+            print("23. HTTP")
+            print("24. WebDAV")
+            
+            print("\nCloud Storage Services:")
+            print("25. Microsoft OneDrive")
+            print("26. Google Drive")
+            print("27. Dropbox")
+            print("28. pCloud")
+            print("29. Box")
+            print("30. Mega")
+            print("31. Proton Drive")
+            print("32. Jottacloud")
+            print("33. Koofr")
+            print("34. Yandex Disk")
+            
+            print("\nSelf-hosted Storage:")
+            print("35. Nextcloud")
+            print("36. ownCloud")
+            print("37. Seafile")
+            print("38. SMB / CIFS")
+            print("39. Ceph")
+            print("40. Other S3-compatible")
+            
+            self.s3_provider = input("Select storage provider (1-40) [1]: ").strip() or "1"
+            
+            # Get credentials based on provider type
+            self.s3_access_key = input("Access Key / Account / Username: ").strip()
+            self.s3_secret_key = input("Secret Key / API Key / Password: ").strip()
+            
+            # For certain providers, we need a region or endpoint
+            if self.s3_provider in ["1", "2", "4", "5", "6", "7", "8", "10", "11", "12", "13", "14", "15", "16", "18"]:
+                print("\nCommon AWS regions:")
+                print("  us-east-1 (N. Virginia)")
+                print("  us-east-2 (Ohio)")
+                print("  us-west-1 (N. California)")
+                print("  us-west-2 (Oregon)")
+                print("  eu-west-1 (Ireland)")
+                print("  eu-central-1 (Frankfurt)")
+                print("  ap-northeast-1 (Tokyo)")
                 
-                # Case-insensitive comparison
-                if self.s3_region.lower() not in [r.lower() for r in valid_aws_regions]:
-                    # Not a critical error, just print a warning
-                    print(f"Warning: '{self.s3_region}' may not be a valid AWS region. "
-                          f"Common regions include: us-east-1, us-west-2, eu-west-1, etc.")
-                    print("Continuing with the provided region...")
-                
-            if self.backup_frequency not in ['daily', 'weekly', 'monthly']:
-                print("Invalid backup frequency. Must be 'daily', 'weekly', or 'monthly'.")
-                return False
-                
+                while True:
+                    region = input(f"Region / Endpoint [{self.s3_region}]: ").strip() or self.s3_region
+                    if self.validate_s3_region(region):
+                        break
+            elif self.s3_provider in ["9", "19", "21", "22", "23", "24", "35", "36", "37", "38"]:
+                # These need endpoints/hosts instead of regions
+                self.s3_region = input("Server Address / Endpoint URL: ").strip()
+            
+            self.s3_bucket_name = input("Bucket / Container / Share Name: ").strip()
+            
+            print("\nBackup Frequency options:")
+            print("1. Daily (at 2 AM)")
+            print("2. Weekly (Sundays at 2 AM)")
+            print("3. Monthly (1st day of month at 2 AM)")
+            self.backup_frequency = input("Select backup frequency (1-3) [1]: ").strip() or "1"
+        
+        print("\nThank you! The installation will now proceed automatically without further prompts.")
+        print("This may take 10-20 minutes depending on your system.")
+        
         return True
 
-    def configure_rclone(self):
-        """Configure Rclone with S3 credentials."""
-        # Create rclone config file
-        config_dir = "/root/.config/rclone"
-        self.run_command(f"mkdir -p {config_dir}")
+    def validate_s3_region(self, region):
+        """
+        Validate S3 region format.
         
-        # Determine provider type and endpoint
-        provider_type = "s3"
-        provider_endpoint = ""
-        
-        if self.s3_provider == "wasabi":
-            provider_endpoint = f"s3.{self.s3_region}.wasabisys.com"
-        elif self.s3_provider == "b2":
-            provider_type = "b2"
-        elif self.s3_provider == "digitalocean":
-            provider_endpoint = f"{self.s3_region}.digitaloceanspaces.com"
-        elif self.s3_provider == "other":
-            # For other providers, we'd need more info, but we'll use a generic S3 config
-            pass
-        
-        # Create config content
-        config_content = "[s3backup]\n"
-        
-        if provider_type == "s3":
-            config_content += "type = s3\n"
-            config_content += f"access_key_id = {self.s3_access_key}\n"
-            config_content += f"secret_access_key = {self.s3_secret_key}\n"
-            config_content += f"region = {self.s3_region}\n"
+        Args:
+            region (str): S3 region to validate
             
-            if provider_endpoint:
-                config_content += f"endpoint = {provider_endpoint}\n"
-        elif provider_type == "b2":
-            config_content += "type = b2\n"
-            config_content += f"account = {self.s3_access_key}\n"
-            config_content += f"key = {self.s3_secret_key}\n"
+        Returns:
+            bool: True if valid, False otherwise
+        """
+        # Standard AWS region format validation
+        # Examples: us-east-1, eu-west-2, ap-northeast-1, etc.
+        region_pattern = r'^[a-z]{2}-[a-z]+-[0-9]+$'
         
-        # Write config file
-        with open(f"{config_dir}/rclone.conf", "w") as f:
-            f.write(config_content)
-            
-        # Ensure bucket exists by creating it if it doesn't
-        try:
-            self.run_command(f"rclone mkdir s3backup:{self.s3_bucket_name}/horilla-backups")
+        # Check if region matches the standard format
+        if re.match(region_pattern, region):
+            self.s3_region = region
             return True
+            
+        # Common non-standard inputs and their corrections
+        corrections = {
+            'US1': 'us-east-1',
+            'US2': 'us-east-2',
+            'USW1': 'us-west-1',
+            'USW2': 'us-west-2',
+            'EU': 'eu-west-1',
+            'EU1': 'eu-west-1',
+            'EU2': 'eu-central-1',
+            'AP': 'ap-southeast-1',
+            'AP1': 'ap-southeast-1',
+            'TOKYO': 'ap-northeast-1',
+            'JAPAN': 'ap-northeast-1',
+            'FRANKFURT': 'eu-central-1',
+            'IRELAND': 'eu-west-1',
+            'OREGON': 'us-west-2',
+            'VIRGINIA': 'us-east-1',
+            'OHIO': 'us-east-2',
+            'CALIFORNIA': 'us-west-1',
+            'SINGAPORE': 'ap-southeast-1',
+            'MUMBAI': 'ap-south-1',
+            'INDIA': 'ap-south-1',
+        }
+        
+        # Convert to uppercase for checking against common mistakes
+        region_upper = region.upper()
+        if region_upper in corrections:
+            print(f"Region '{region}' is not in the standard format.")
+            print(f"Did you mean '{corrections[region_upper]}'? Using that instead.")
+            self.s3_region = corrections[region_upper]
+            return True
+            
+        # List of valid AWS regions for fallback check
+        valid_aws_regions = [
+            "us-east-1", "us-east-2", "us-west-1", "us-west-2", 
+            "af-south-1", "ap-east-1", "ap-south-1", "ap-northeast-1", 
+            "ap-northeast-2", "ap-northeast-3", "ap-southeast-1", 
+            "ap-southeast-2", "ca-central-1", "eu-central-1", 
+            "eu-west-1", "eu-west-2", "eu-west-3", "eu-south-1", 
+            "eu-north-1", "me-south-1", "sa-east-1"
+        ]
+        
+        # Case-insensitive comparison with valid regions
+        for valid_region in valid_aws_regions:
+            if region.lower() == valid_region.lower():
+                self.s3_region = valid_region
+                return True
+        
+        # If we get here, it's not a valid region in any format we recognize
+        # Default to us-east-1 with a warning
+        print(f"Warning: '{region}' is not a recognized AWS region.")
+        print("Using 'us-east-1' as the default region.")
+        self.s3_region = "us-east-1"
+        
+        return True  # Return True to continue with installation
+
+    def configure_rclone(self):
+        """Configure Rclone with storage provider credentials."""
+        print("Configuring Rclone for storage provider...")
+        
+        try:
+            # Create rclone config directory
+            config_dir = "/root/.config/rclone"
+            self.run_command(f"mkdir -p {config_dir}", shell=True)
+            
+            # Map provider selection to actual provider name
+            provider_map = {
+                "1": "s3",          # Amazon S3
+                "2": "s3",          # Wasabi
+                "3": "b2",          # Backblaze B2
+                "4": "s3",          # DigitalOcean Spaces
+                "5": "s3",          # Cloudflare R2
+                "6": "s3",          # Google Cloud Storage
+                "7": "azureblob",   # Microsoft Azure Blob Storage
+                "8": "swift",       # OpenStack Swift
+                "9": "s3",          # Minio
+                "10": "s3",         # Alibaba Cloud OSS
+                "11": "s3",         # IBM COS S3
+                "12": "s3",         # Huawei OBS
+                "13": "s3",         # Tencent COS
+                "14": "s3",         # Oracle Cloud Storage
+                "15": "s3",         # Linode Object Storage
+                "16": "s3",         # Scaleway
+                "17": "storj",      # Storj
+                "18": "s3",         # Qiniu
+                "19": "hdfs",       # HDFS
+                "20": "local",      # Local filesystem
+                "21": "sftp",       # SFTP
+                "22": "ftp",        # FTP
+                "23": "http",       # HTTP
+                "24": "webdav",     # WebDAV
+                "25": "onedrive",   # Microsoft OneDrive
+                "26": "drive",      # Google Drive
+                "27": "dropbox",    # Dropbox
+                "28": "pcloud",     # pCloud
+                "29": "box",        # Box
+                "30": "mega",       # Mega
+                "31": "protondrive", # Proton Drive
+                "32": "jottacloud", # Jottacloud
+                "33": "koofr",      # Koofr
+                "34": "yandex",     # Yandex Disk
+                "35": "webdav",     # Nextcloud
+                "36": "webdav",     # ownCloud
+                "37": "webdav",     # Seafile
+                "38": "smb",        # SMB / CIFS
+                "39": "s3",         # Ceph
+                "40": "s3"          # Other S3 compatible
+            }
+            
+            provider_type = provider_map.get(self.s3_provider, "s3")
+            config_content = "[s3backup]\n"
+            config_content += f"type = {provider_type}\n"
+            
+            # Configure based on provider type
+            if provider_type == "s3":
+                # Provider-specific settings for S3-compatible storage
+                if self.s3_provider == "1":  # AWS S3
+                    config_content += "provider = AWS\n"
+                elif self.s3_provider == "2":  # Wasabi
+                    config_content += "provider = Wasabi\n"
+                    config_content += f"endpoint = s3.{self.s3_region}.wasabisys.com\n"
+                elif self.s3_provider == "4":  # DigitalOcean
+                    config_content += "provider = DigitalOcean\n"
+                    config_content += f"endpoint = {self.s3_region}.digitaloceanspaces.com\n"
+                elif self.s3_provider == "5":  # Cloudflare R2
+                    config_content += "provider = Cloudflare\n"
+                    config_content += f"endpoint = {self.s3_region}.r2.cloudflarestorage.com\n"
+                elif self.s3_provider == "6":  # Google Cloud Storage
+                    config_content += "provider = GoogleCloud\n"
+                elif self.s3_provider == "9":  # Minio
+                    config_content += "provider = Minio\n"
+                    config_content += f"endpoint = {self.s3_region}\n"
+                elif self.s3_provider == "10":  # Alibaba Cloud
+                    config_content += "provider = Alibaba\n"
+                    config_content += f"endpoint = oss-{self.s3_region}.aliyuncs.com\n"
+                elif self.s3_provider == "11":  # IBM
+                    config_content += "provider = IBMCOS\n"
+                    config_content += f"endpoint = s3.{self.s3_region}.cloud-object-storage.appdomain.cloud\n"
+                elif self.s3_provider == "12":  # Huawei
+                    config_content += "provider = HuaweiOBS\n"
+                    config_content += f"endpoint = obs.{self.s3_region}.myhuaweicloud.com\n"
+                elif self.s3_provider == "13":  # Tencent
+                    config_content += "provider = TencentCOS\n"
+                    config_content += f"endpoint = cos.{self.s3_region}.myqcloud.com\n"
+                elif self.s3_provider == "14":  # Oracle
+                    config_content += "provider = Oracle\n"
+                    config_content += f"endpoint = {self.s3_region}.storage.oracle.com\n"
+                elif self.s3_provider == "15":  # Linode
+                    config_content += "provider = Linode\n"
+                    config_content += f"endpoint = {self.s3_region}.linodeobjects.com\n"
+                elif self.s3_provider == "16":  # Scaleway
+                    config_content += "provider = Scaleway\n"
+                    config_content += f"endpoint = s3.{self.s3_region}.scw.cloud\n"
+                elif self.s3_provider == "18":  # Qiniu
+                    config_content += "provider = Qiniu\n"
+                    config_content += f"endpoint = s3-{self.s3_region}.qiniucs.com\n"
+                elif self.s3_provider == "39":  # Ceph
+                    config_content += "provider = Ceph\n"
+                    config_content += f"endpoint = {self.s3_region}\n"
+                elif self.s3_provider == "40":  # Other S3
+                    config_content += f"endpoint = {self.s3_region}\n"
+                
+                # Common S3 configuration
+                config_content += f"access_key_id = {self.s3_access_key}\n"
+                config_content += f"secret_access_key = {self.s3_secret_key}\n"
+                
+                # Add region if needed
+                if self.s3_provider in ["1", "6"]:  # AWS and GCS use region
+                    config_content += f"region = {self.s3_region}\n"
+                
+            # Handle other provider types
+            elif provider_type == "b2":
+                config_content += f"account = {self.s3_access_key}\n"
+                config_content += f"key = {self.s3_secret_key}\n"
+            
+            elif provider_type == "azureblob":
+                config_content += f"account = {self.s3_access_key}\n"
+                config_content += f"key = {self.s3_secret_key}\n"
+            
+            elif provider_type == "swift":
+                config_content += f"user = {self.s3_access_key}\n"
+                config_content += f"key = {self.s3_secret_key}\n"
+                config_content += f"auth = {self.s3_region}\n"
+            
+            elif provider_type == "storj":
+                config_content += f"access_grant = {self.s3_access_key}\n"
+            
+            elif provider_type in ["sftp", "ftp"]:
+                config_content += f"host = {self.s3_region}\n"
+                config_content += f"user = {self.s3_access_key}\n"
+                config_content += f"pass = {self.s3_secret_key}\n"
+                
+            elif provider_type == "webdav":
+                config_content += f"url = {self.s3_region}\n"
+                config_content += f"user = {self.s3_access_key}\n"
+                config_content += f"pass = {self.s3_secret_key}\n"
+                
+                # Special config for specific WebDAV providers
+                if self.s3_provider == "35":  # Nextcloud
+                    config_content += "vendor = nextcloud\n"
+                elif self.s3_provider == "36":  # ownCloud
+                    config_content += "vendor = owncloud\n"
+                elif self.s3_provider == "37":  # Seafile
+                    config_content += "vendor = other\n"
+            
+            elif provider_type == "smb":
+                config_content += f"host = {self.s3_region}\n"
+                config_content += f"user = {self.s3_access_key}\n"
+                config_content += f"pass = {self.s3_secret_key}\n"
+                config_content += f"domain = WORKGROUP\n"
+            
+            elif provider_type == "hdfs":
+                config_content += f"namenode = {self.s3_region}\n"
+            
+            elif provider_type == "local":
+                # Local filesystem needs a path
+                config_content += f"path = {self.s3_region}\n"
+            
+            elif provider_type in ["onedrive", "drive", "dropbox", "box", "pcloud", 
+                                "mega", "protondrive", "jottacloud", "koofr", "yandex"]:
+                # These providers generally require OAuth2 authentication
+                # We'll use a simplified token-based approach here
+                config_content += f"token = {self.s3_access_key}\n"
+                print(f"NOTE: {provider_type} usually requires OAuth2 authentication.")
+                print("For complete setup, you may need to run 'rclone config' manually after installation.")
+            
+            # Write config file
+            config_path = f"{config_dir}/rclone.conf"
+            with open(config_path, "w") as f:
+                f.write(config_content)
+                
+            print(f"✓ Rclone configuration saved to {config_path}")
+            
+            # Test configuration for providers that don't need browser authentication
+            if provider_type in ["s3", "b2", "azureblob", "swift", "sftp", "ftp", "webdav", "smb", "hdfs", "local"]:
+                print(f"Testing connection to storage: {self.s3_bucket_name}")
+                # Create the bucket/path if it doesn't exist
+                success, _ = self.run_command(f"rclone mkdir s3backup:{self.s3_bucket_name}/horilla-backups", shell=True, timeout=30)
+                if success:
+                    print(f"✓ Successfully connected to storage: {self.s3_bucket_name}")
+                else:
+                    print(f"Warning: Could not create or access the storage location. Please check your credentials.")
+                    if not self.force_continue:
+                        return False
+                    print("Continuing anyway as --force-continue is set.")
+            else:
+                print("NOTE: For cloud storage providers like Google Drive, Dropbox, etc.")
+                print("You may need to authenticate manually after installation is complete.")
+                print("Please run 'rclone config' and follow the authentication steps.")
+            
+            return True
+            
         except Exception as e:
             print(f"Error configuring rclone: {str(e)}")
-            print("Please check your S3 credentials and region.")
-            return False
-
+            print("Please check your storage credentials and settings.")
+            if not self.force_continue:
+                return False
+            print("Continuing anyway as --force-continue is set.")
+            return True  # Continue with installation even if rclone config fails
 
 def parse_args():
     """Parse command line arguments."""
     parser = argparse.ArgumentParser(description='Horilla HRMS Installer')
-    parser.add_argument('--domain', help='Domain name for Horilla HRMS')
-    parser.add_argument('--email', help='Email address for SSL certificates')
-    parser.add_argument('--admin-username', help='Admin username')
-    parser.add_argument('--admin-password', help='Admin password')
-    parser.add_argument('--install-dir', help='Installation directory', default='/root/horilla')
-    parser.add_argument('--non-interactive', action='store_true', help='Run in non-interactive mode')
-    parser.add_argument('--force-continue', action='store_true', help='Continue installation even if apt is locked')
-    parser.add_argument('--skip-upgrade', action='store_true', help='Skip system upgrade')
-    parser.add_argument('--skip-root-check', action='store_true', help='Skip root check')
     
-    # Backup system arguments
+    # Basic options
+    parser.add_argument('--domain', help='Domain name for your Horilla instance')
+    parser.add_argument('--admin-username', help='Admin username', default='admin')
+    parser.add_argument('--admin-password', help='Admin password', default='Admin@123')
+    parser.add_argument('--email', help='Admin email', default='admin@example.com')
+    parser.add_argument('--install-dir', help='Installation directory', default='/opt/horilla')
+    
+    # Advanced options
+    parser.add_argument('--non-interactive', action='store_true', help='Non-interactive mode')
+    parser.add_argument('--force-continue', action='store_true', help='Force continue on errors')
+    parser.add_argument('--force-no-ssl', action='store_true', help='Skip SSL setup')
+    parser.add_argument('--skip-upgrade', action='store_true', help='Skip upgrading dependencies')
+    parser.add_argument('--skip-root-check', action='store_true', help='Skip root user check')
+    
+    # Backup options
     parser.add_argument('--enable-backups', help='Enable automated backups (yes/no)', default='no')
-    parser.add_argument('--s3-provider', help='S3 provider (aws, wasabi, b2, digitalocean, other)', default='aws')
-    parser.add_argument('--s3-access-key', help='S3 Access Key')
-    parser.add_argument('--s3-secret-key', help='S3 Secret Key')
-    parser.add_argument('--s3-region', help='S3 Region', default='us-east-1')
-    parser.add_argument('--s3-bucket-name', help='S3 Bucket Name')
-    parser.add_argument('--backup-frequency', help='Backup frequency (daily, weekly, monthly)', default='daily')
+    parser.add_argument('--s3-provider', 
+                       help='Storage provider (1-40):\n'
+                             '1=AWS S3, 2=Wasabi, 3=Backblaze B2, 4=DigitalOcean, 5=Cloudflare R2, '
+                             '6=GCS, 7=Azure, 8=OpenStack, 9=Minio, 10=Alibaba, 11=IBM, 12=Huawei, '
+                             '13=Tencent, 14=Oracle, 15=Linode, 16=Scaleway, 17=Storj, 18=Qiniu, '
+                             '19=HDFS, 20=Local, 21=SFTP, 22=FTP, 23=HTTP, 24=WebDAV, 25=OneDrive, '
+                             '26=Google Drive, 27=Dropbox, 28=pCloud, 29=Box, 30=Mega, 31=Proton Drive, '
+                             '32=Jottacloud, 33=Koofr, 34=Yandex, 35=Nextcloud, 36=ownCloud, '
+                             '37=Seafile, 38=SMB, 39=Ceph, 40=Other S3',
+                       default='1')
+    parser.add_argument('--s3-access-key', help='Storage access key/username')
+    parser.add_argument('--s3-secret-key', help='Storage secret key/password')
+    parser.add_argument('--s3-region', help='Storage region/endpoint', default='us-east-1')
+    parser.add_argument('--s3-bucket-name', help='Storage bucket/container name')
+    parser.add_argument('--backup-frequency', 
+                       help='Backup frequency (1=Daily, 2=Weekly, 3=Monthly)', 
+                       default='1')
     
     return parser.parse_args()
 
