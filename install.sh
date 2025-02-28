@@ -143,8 +143,23 @@ else
         # S3 credentials
         read -p "S3 Access Key: " S3_ACCESS_KEY
         read -p "S3 Secret Key: " S3_SECRET_KEY
+        
+        # S3 region with validation
+        if [ "$S3_PROVIDER" = "aws" ]; then
+            echo
+            echo "Common AWS regions:"
+            echo "  us-east-1 (N. Virginia)"
+            echo "  us-east-2 (Ohio)"
+            echo "  us-west-1 (N. California)"
+            echo "  us-west-2 (Oregon)"
+            echo "  eu-west-1 (Ireland)"
+            echo "  eu-central-1 (Frankfurt)"
+            echo "  ap-northeast-1 (Tokyo)"
+        fi
+        
         read -p "S3 Region [${DEFAULT_S3_REGION}]: " S3_REGION
         S3_REGION=${S3_REGION:-$DEFAULT_S3_REGION}
+        
         read -p "S3 Bucket Name: " S3_BUCKET_NAME
         
         # Backup frequency
@@ -175,7 +190,7 @@ else
     echo
     
     # Set all arguments for non-interactive mode
-    DEFAULT_ARGS="--domain $DOMAIN --email $EMAIL --admin-username $ADMIN_USER --admin-password $ADMIN_PASSWORD --install-dir $INSTALL_DIR $BACKUP_ARGS --non-interactive --force-continue"
+    DEFAULT_ARGS="--domain $DOMAIN --email $EMAIL --admin-username $ADMIN_USER --admin-password $ADMIN_PASSWORD --install-dir $INSTALL_DIR $BACKUP_ARGS --non-interactive --force-continue --skip-upgrade"
 fi
 
 # Create temporary directory
@@ -189,7 +204,11 @@ curl -s https://raw.githubusercontent.com/MNylif/hrms-horilla/main/install.py -o
 # Run the installer with all provided arguments
 echo "Starting installation..."
 python3 install.py $DEFAULT_ARGS "$@"
+RESULT=$?
 
 # Clean up
 cd - > /dev/null
 rm -rf "$TEMP_DIR"
+
+# Exit with the same status as the Python script
+exit $RESULT

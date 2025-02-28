@@ -31,6 +31,7 @@ class HorillaInstaller:
         self.install_dir = args.install_dir
         self.non_interactive = args.non_interactive
         self.force_continue = args.force_continue
+        self.skip_upgrade = args.skip_upgrade if hasattr(args, 'skip_upgrade') else False
         
         # Backup system settings
         self.enable_backups = args.enable_backups.lower() == 'yes'
@@ -58,390 +59,187 @@ class HorillaInstaller:
         sys.exit(0)
 
     def run_command(self, command, shell=False, cwd=None, env=None, timeout=None):
-        """Execute a shell command and return the output."""
-        if timeout is None:
-            timeout = 600
-
+        """Run a command and return its output."""
+        print(f"Running command (timeout: {timeout or 'None'}s): {command}")
+        
+        # Set default environment variables
+        if env is None:
+            env = os.environ.copy()
+            
+        # Set PAGER to cat to avoid interactive pagers
+        env["PAGER"] = "cat"
+        
         try:
-            if isinstance(command, str) and not shell:
-                command = command.split()
-            
-            print(f"Running command (timeout: {timeout}s): {command}")
-            
-            process = subprocess.Popen(
+            # Run the command
+            result = subprocess.run(
                 command,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
                 shell=shell,
                 cwd=cwd,
-                env=env
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=timeout
             )
             
-            try:
-                stdout, stderr = process.communicate(timeout=timeout)
-                returncode = process.returncode
-            except subprocess.TimeoutExpired:
-                process.kill()
-                print(f"Command timed out after {timeout} seconds: {command}")
-                return False, "Command timed out"
-            
-            if returncode != 0:
-                print(f"Command failed with exit code {returncode}: {command}")
-                print(f"Error: {stderr}")
-                return False, stderr
-            
-            return True, stdout
+            # Check the return code
+            if result.returncode != 0:
+                print(f"Command failed with exit code {result.returncode}")
+                print(f"Error output: {result.stderr}")
+                raise Exception(f"Command failed with exit code {result.returncode}")
+                
+            # Return the output
+            return result.stdout
+        except subprocess.TimeoutExpired:
+            print(f"Command timed out after {timeout} seconds")
+            raise Exception(f"Command timed out after {timeout} seconds")
         except Exception as e:
-            print(f"Exception occurred: {e}")
-            return False, str(e)
-
-    def check_apt_processes(self):
-        """Check for running apt processes and return details."""
-        cmd = "ps aux | grep -E 'apt|dpkg' | grep -v grep || true"
-        success, output = self.run_command(cmd, shell=True)
-        
-        if not success:
-            return []
+            print(f"Failed to run command: {str(e)}")
+            raise
             
-        processes = []
-        for line in output.strip().split('\n'):
-            if line:
-                parts = line.split()
-                if len(parts) >= 2:
-                    pid = parts[1]
-                    command = ' '.join(parts[10:]) if len(parts) > 10 else 'unknown'
-                    processes.append((pid, command))
-        
-        return processes
-
-    def check_process_age(self, pid):
-        """Check how long a process has been running."""
-        cmd = f"ps -o etimes= -p {pid}"
-        success, output = self.run_command(cmd, shell=True)
-        
-        if not success or not output.strip():
-            return None
-            
-        try:
-            seconds = int(output.strip())
-            return seconds
-        except ValueError:
-            return None
-
-    def run_apt_command(self, command, timeout=None):
-        """Run an apt command with retries for lock issues."""
-        for attempt in range(1, 6):  # max 5 attempts
-            success, output = self.run_command(command, shell=True, timeout=timeout)
-            
-            # Check if it's a lock error
-            if not success and ('Could not get lock' in output or 'Unable to acquire' in output or 'dpkg frontend lock' in output):
-                # Extract the PID from the error message if possible
-                pid_match = re.search(r'process (\d+)', output)
-                locking_pid = pid_match.group(1) if pid_match else None
-                
-                # Check for running apt processes
-                apt_processes = self.check_apt_processes()
-                
-                if locking_pid:
-                    # Check how long the locking process has been running
-                    age_seconds = self.check_process_age(locking_pid)
-                    age_minutes = age_seconds // 60 if age_seconds else None
-                    
-                    print(f"\nLock is held by process {locking_pid}")
-                    if age_minutes:
-                        print(f"This process has been running for {age_minutes} minutes.")
-                    
-                    # Print what the process is doing
-                    for pid, cmd in apt_processes:
-                        if pid == locking_pid:
-                            print(f"Process {pid} is running: {cmd}")
-                
-                print("\nRunning apt/dpkg processes:")
-                if apt_processes:
-                    for pid, cmd in apt_processes:
-                        print(f"  PID {pid}: {cmd}")
-                else:
-                    print("  No apt/dpkg processes found (the lock might be stale)")
-                
-                # If we've tried a few times and there's still a lock, ask what to do
-                if attempt >= 3 and not self.force_continue and self.is_tty:
-                    print("\nThe system package manager is locked by another process.")
-                    print("Options:")
-                    print("  1. Wait and retry (recommended if a system update is in progress)")
-                    print("  2. Abort installation")
-                    print("  3. Try to continue anyway (may cause issues)")
-                    
-                    try:
-                        choice = input("\nEnter your choice (1-3): ").strip()
-                        
-                        if choice == '2':
-                            print("Aborting installation as requested.")
-                            sys.exit(0)
-                        elif choice == '3':
-                            print("Attempting to continue despite lock issues...")
-                            # Skip this command and proceed
-                            return True, "Skipped due to lock"
-                    except (EOFError, KeyboardInterrupt):
-                        # If we can't get input, default to option 1 (wait and retry)
-                        print("\nCannot read input. Defaulting to wait and retry.")
-                
-                if attempt < 5:
-                    print(f"\nWaiting {10} seconds before retry {attempt}/5...")
-                    time.sleep(10)
-                    continue
-            
-            # Either it succeeded or it failed with a non-lock error, or we're out of retries
-            return success, output
-        
-        # If we're here, we've exhausted all retries
-        if not self.force_continue and self.is_tty:
-            print("\nCould not acquire package manager lock after multiple attempts.")
-            print("Options:")
-            print("  1. Abort installation (recommended)")
-            print("  2. Try to continue anyway (may cause issues)")
-            
-            try:
-                choice = input("\nEnter your choice (1-2): ").strip()
-                
-                if choice == '2':
-                    print("Attempting to continue despite lock issues...")
-                    return True, "Skipped due to lock"
-                else:
-                    print("Aborting installation as requested.")
-                    sys.exit(0)
-            except (EOFError, KeyboardInterrupt):
-                # If we can't get input, default to aborting
-                print("\nCannot read input. Aborting installation.")
-                sys.exit(1)
-        elif self.force_continue:
-            print("Force continue enabled. Skipping this command and proceeding...")
-            return True, "Skipped due to lock (force continue enabled)"
-        
-        return False, f"Failed after 5 attempts: {command}"
-
-    def get_user_input(self, prompt, default=None, validate_func=None, password=False):
-        """Get user input with validation and default values."""
-        if self.non_interactive:
-            if default is not None:
-                return default
-            else:
-                print(f"Error: Required input '{prompt}' has no default value in non-interactive mode.")
-                sys.exit(1)
-        
-        # Ensure we're in a TTY environment
-        if not self.is_tty:
-            print(f"Warning: Not in a TTY environment. Using default value: {default}")
-            if default is None:
-                print(f"Error: Required input '{prompt}' has no default value in non-TTY environment.")
-                sys.exit(1)
-            return default
-        
-        while True:
-            if default:
-                prompt_text = f"{prompt} [{default}]: "
-            else:
-                prompt_text = f"{prompt}: "
-            
-            try:
-                if password:
-                    value = getpass.getpass(prompt_text)
-                else:
-                    value = input(prompt_text)
-                
-                if not value and default:
-                    value = default
-                
-                if validate_func and not validate_func(value):
-                    print("Invalid input. Please try again.")
-                    continue
-                
-                return value
-            except (EOFError, KeyboardInterrupt):
-                print("\nInput interrupted. Exiting.")
-                sys.exit(1)
-
-    def validate_domain(self, domain):
-        """Validate domain format."""
-        if not domain:
-            return False
-            
-        # Allow .nip.io domains (automatic DNS)
-        if domain.endswith('.nip.io'):
-            return True
-            
-        # Basic domain validation
-        domain_pattern = r'^([a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,}$'
-        if not re.match(domain_pattern, domain):
-            print("Invalid domain format. Please enter a valid domain (e.g., hrms.example.com).")
-            return False
-            
-        # Check if domain is resolvable
-        if self.is_tty and not self.force_continue:
-            try:
-                import socket
-                socket.gethostbyname(domain)
-            except socket.gaierror:
-                print(f"\nWarning: Could not resolve domain '{domain}'. This may indicate that:")
-                print("1. The DNS A record has not been set up correctly")
-                print("2. DNS changes have not propagated yet")
-                print("3. You're using a domain for internal/testing purposes only")
-                print("\nTo set up DNS correctly:")
-                print("- Log in to your domain registrar or DNS provider")
-                print("- Create an A record:")
-                print(f"  - Type: A")
-                print(f"  - Name/Host: {domain.split('.')[0]} (for {domain})")
-                print(f"  - Value/Points to: {self.get_server_ip()}")
-                print("\nDo you want to continue anyway? (y/n)")
-                
-                try:
-                    choice = input().strip().lower()
-                    if choice != 'y':
-                        return False
-                except (EOFError, KeyboardInterrupt):
-                    return False
-                    
-        return True
-        
-    def get_server_ip(self):
-        """Get the server's public IP address."""
-        try:
-            # Try to get the public IP
-            import urllib.request
-            return urllib.request.urlopen('https://api.ipify.org').read().decode('utf8')
-        except:
-            # Fall back to local IP
-            import socket
-            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            try:
-                # doesn't even have to be reachable
-                s.connect(('10.255.255.255', 1))
-                ip = s.getsockname()[0]
-            except Exception:
-                ip = '127.0.0.1'
-            finally:
-                s.close()
-            return ip
-
-    def validate_email(self, email):
-        """Validate email format."""
-        if not email:
-            print("Email cannot be empty.")
-            return False
-            
-        email_pattern = re.compile(r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$')
-        if not email_pattern.match(email):
-            print("Invalid email format. Please enter a valid email address.")
-            return False
-            
-        return True
-
     def check_system_requirements(self):
-        """Check if the system meets the requirements."""
+        """Check if system meets all requirements."""
         print("\n[1/8] Checking system requirements...")
         
         # Check if running on Ubuntu
-        success, output = self.run_command("lsb_release -is", timeout=30)
-        if not success or "Ubuntu" not in output:
-            print("This script is designed for Ubuntu. Current OS:", output.strip() if success else "Unknown")
-            return False
+        try:
+            # Using lsb_release is more reliable than checking /etc/os-release
+            distribution = self.run_command(["lsb_release", "-is"], timeout=30).strip()
+            if distribution.lower() != "ubuntu":
+                print(f"⚠️ Warning: This installer is optimized for Ubuntu, but detected {distribution}")
+                print("The installation may not work correctly on this distribution.")
+                if not self.force_continue:
+                    print("Use --force-continue to proceed anyway.")
+                    return False
+                print("Continuing anyway as --force-continue is set.")
+            else:
+                print(f"✓ Running on {distribution}")
+        except Exception as e:
+            print(f"⚠️ Warning: Failed to detect operating system: {str(e)}")
+            if not self.force_continue:
+                print("Use --force-continue to proceed anyway.")
+                return False
+            print("Continuing anyway as --force-continue is set.")
             
-        print("✓ Running on Ubuntu")
-        return True
-
-    def install_dependencies(self):
-        """Install required dependencies."""
-        print("\n[2/8] Installing dependencies...")
+        # Check Docker and Docker Compose
+        docker_services = ["docker.service", "docker.socket"]
+        docker_running = False
         
-        # Update package index
-        print("Updating package index...")
-        success, output = self.run_apt_command("apt-get update -y", timeout=300)
-        if not success:
-            print(f"Failed to update package index: {output}")
-            return False
-        
-        # Skip apt upgrade if configured
-        if not self.skip_upgrade:
-            print("Upgrading system packages (this may take a while)...")
-            success, output = self.run_apt_command("DEBIAN_FRONTEND=noninteractive apt-get upgrade -y -q", timeout=600)
-            if not success:
-                print(f"Warning: System upgrade failed: {output}")
-                print("Continuing with installation...")
-        else:
-            print("Skipping system upgrade...")
-        
-        # First, let's wait for any ongoing apt/dpkg processes to finish
-        print("Waiting for any ongoing apt/dpkg processes to finish...")
-        self.run_command("ps aux | grep -E 'apt|dpkg' | grep -v grep || true", shell=True)
-        
-        # Try to fix any interrupted dpkg installations
-        print("Attempting to fix any interrupted dpkg installations...")
-        self.run_apt_command("DEBIAN_FRONTEND=noninteractive dpkg --configure -a", timeout=300)
-        
-        # Install required packages
-        packages = [
-            "apt-transport-https", 
-            "ca-certificates", 
-            "curl", 
-            "software-properties-common",
-            "gnupg",
-            "lsb-release"
-        ]
-        
-        # Install one package at a time to minimize lock issues
-        for package in packages:
-            print(f"Installing {package}...")
-            success, output = self.run_apt_command(f"DEBIAN_FRONTEND=noninteractive apt-get install -y {package}", timeout=300)
-            if not success:
-                print(f"Failed to install {package}: {output}")
-                return False
-        
-        # Set up Docker repository
-        print("Setting up Docker repository...")
-        commands = [
-            "mkdir -p /etc/apt/keyrings",
-            "curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg",
-            'echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" | tee /etc/apt/sources.list.d/docker.list > /dev/null',
-        ]
-        
-        for cmd in commands:
-            success, output = self.run_command(cmd, shell=True, timeout=300)
-            if not success:
-                print(f"Failed to execute: {cmd}")
-                print(f"Error: {output}")
-                return False
-        
-        # Update package index again after adding Docker repository
-        print("Updating package index with Docker repository...")
-        success, output = self.run_apt_command("apt-get update -y", timeout=300)
-        if not success:
-            print(f"Failed to update package index with Docker repository: {output}")
-            return False
-        
-        # Install Docker packages
-        docker_packages = [
-            "docker-ce",
-            "docker-ce-cli", 
-            "containerd.io", 
-            "docker-buildx-plugin", 
-            "docker-compose-plugin"
-        ]
-        
-        for package in docker_packages:
-            print(f"Installing {package}...")
-            success, output = self.run_apt_command(f"DEBIAN_FRONTEND=noninteractive apt-get install -y {package}", timeout=300)
-            if not success:
-                print(f"Failed to install {package}: {output}")
-                return False
-        
-        # Install Nginx and Certbot
-        print("Installing Nginx and Certbot...")
-        success, output = self.run_apt_command("DEBIAN_FRONTEND=noninteractive apt-get install -y nginx certbot python3-certbot-nginx", timeout=300)
-        if not success:
-            print(f"Failed to install Nginx and Certbot: {output}")
-            return False
+        for service in docker_services:
+            try:
+                status = self.run_command(f"systemctl is-active {service}")
+                if "active" in status:
+                    docker_running = True
+                    break
+            except:
+                pass
                 
-        print("✓ Dependencies installed successfully")
+        if not docker_running:
+            print("✓ Docker is not yet installed or running (will be installed)")
+        else:
+            print("✓ Docker is already running")
+            
+        return True
+        
+    def install_dependencies(self):
+        """Install all required dependencies."""
+        print("\n[3/8] Installing dependencies...")
+        
+        # Check if apt is locked
+        try:
+            self.run_command("lsof /var/lib/dpkg/lock-frontend", timeout=10)
+            print("APT is currently locked by another process.")
+            if not self.force_continue:
+                print("Please wait for other package managers to finish and try again.")
+                print("Use --force-continue to try to continue anyway (may cause issues).")
+                return False
+            print("Continuing anyway as --force-continue is set.")
+        except:
+            # Lock not found, which is good
+            pass
+
+        # Update package lists
+        try:
+            print("Updating package index...")
+            self.run_command("apt-get update -y", shell=True, timeout=300)
+        except Exception as e:
+            print(f"Failed to update package lists: {str(e)}")
+            if not self.force_continue:
+                return False
+            print("Continuing anyway as --force-continue is set.")
+            
+        # Install system dependencies
+        dependencies = [
+            "apt-transport-https",
+            "ca-certificates",
+            "curl",
+            "software-properties-common",
+            "python3-pip",
+            "nginx",
+            "certbot",
+            "python3-certbot-nginx"
+        ]
+        
+        # Add backup tools if backups are enabled
+        if self.enable_backups:
+            dependencies.extend(["borgbackup", "rclone", "fuse"])
+            
+        try:
+            print("Installing dependencies...")
+            self.run_command(f"apt-get install -y {' '.join(dependencies)}", shell=True, timeout=600)
+        except Exception as e:
+            print(f"Failed to install dependencies: {str(e)}")
+            if not self.force_continue:
+                return False
+            print("Continuing anyway as --force-continue is set.")
+            
+        # Install Docker if not already installed
+        try:
+            # Check if Docker is already installed
+            self.run_command("docker --version", timeout=10)
+            print("Docker is already installed. Skipping Docker installation.")
+        except:
+            print("Installing Docker...")
+            
+            # Add Docker repository
+            try:
+                # Add Docker GPG key
+                self.run_command("curl -fsSL https://download.docker.com/linux/ubuntu/gpg | apt-key add -", shell=True, timeout=30)
+                
+                # Get Ubuntu codename
+                ubuntu_codename = self.run_command("lsb_release -cs", timeout=10).strip()
+                
+                # Add Docker repository
+                docker_repo = f"deb [arch=amd64] https://download.docker.com/linux/ubuntu {ubuntu_codename} stable"
+                self.run_command(f"add-apt-repository -y '{docker_repo}'", shell=True, timeout=30)
+                
+                # Update package lists again
+                self.run_command("apt-get update -y", shell=True, timeout=60)
+                
+                # Install Docker
+                self.run_command("apt-get install -y docker-ce docker-ce-cli containerd.io docker-compose", shell=True, timeout=300)
+                
+                # Start Docker
+                self.run_command("systemctl enable docker", shell=True, timeout=30)
+                self.run_command("systemctl start docker", shell=True, timeout=30)
+                
+                print("Docker installed successfully.")
+            except Exception as e:
+                print(f"Failed to install Docker: {str(e)}")
+                if not self.force_continue:
+                    return False
+                print("Continuing anyway as --force-continue is set.")
+                
+        # Install pip requirements
+        try:
+            print("Installing Python dependencies...")
+            self.run_command("pip3 install docker-compose", shell=True, timeout=120)
+        except Exception as e:
+            print(f"Failed to install Python dependencies: {str(e)}")
+            if not self.force_continue:
+                return False
+            print("Continuing anyway as --force-continue is set.")
+            
+        print("✓ All dependencies installed successfully.")
         return True
 
     def setup_horilla(self):
@@ -763,11 +561,21 @@ else:
 
     def validate_inputs(self):
         """Validate all input parameters."""
+        print("\n[2/8] Validating installation parameters...")
+        
         # Validate domain
+        if not self.domain:
+            print("Domain cannot be empty.")
+            return False
+            
         if not self.validate_domain(self.domain):
             return False
             
         # Validate email
+        if not self.email:
+            print("Email address cannot be empty.")
+            return False
+            
         if not self.validate_email(self.email):
             return False
             
@@ -781,11 +589,17 @@ else:
             print("Admin password cannot be empty.")
             return False
             
+        # Validate installation directory
+        if not self.install_dir:
+            print("Installation directory cannot be empty.")
+            return False
+            
         # Validate backup settings if enabled
         if self.enable_backups:
             if not self.validate_backup_settings():
                 return False
                 
+        print("✓ All parameters validated successfully")
         return True
         
     def validate_backup_settings(self):
@@ -802,6 +616,25 @@ else:
             if not self.s3_bucket_name:
                 print("S3 Bucket Name is required for backups.")
                 return False
+            
+            # Validate region based on provider
+            if self.s3_provider == "aws":
+                # List of valid AWS regions
+                valid_aws_regions = [
+                    "us-east-1", "us-east-2", "us-west-1", "us-west-2", 
+                    "af-south-1", "ap-east-1", "ap-south-1", "ap-northeast-1", 
+                    "ap-northeast-2", "ap-northeast-3", "ap-southeast-1", 
+                    "ap-southeast-2", "ca-central-1", "eu-central-1", 
+                    "eu-west-1", "eu-west-2", "eu-west-3", "eu-south-1", 
+                    "eu-north-1", "me-south-1", "sa-east-1"
+                ]
+                
+                # Case-insensitive comparison
+                if self.s3_region.lower() not in [r.lower() for r in valid_aws_regions]:
+                    # Not a critical error, just print a warning
+                    print(f"Warning: '{self.s3_region}' may not be a valid AWS region. "
+                          f"Common regions include: us-east-1, us-west-2, eu-west-1, etc.")
+                    print("Continuing with the provided region...")
                 
             if self.backup_frequency not in ['daily', 'weekly', 'monthly']:
                 print("Invalid backup frequency. Must be 'daily', 'weekly', or 'monthly'.")
@@ -889,9 +722,16 @@ else:
         with open(f"{config_dir}/rclone.conf", "w") as f:
             f.write(config_content)
             
-        # Test connection
-        self.run_command(f"rclone mkdir s3backup:{self.s3_bucket_name}/horilla-backups")
-            
+        # Ensure bucket exists by creating it if it doesn't
+        try:
+            self.run_command(f"rclone mkdir s3backup:{self.s3_bucket_name}/horilla-backups")
+            return True
+        except Exception as e:
+            print(f"Error configuring rclone: {str(e)}")
+            print("Please check your S3 credentials and region.")
+            return False
+
+
     def create_rclone_service(self):
         """Create systemd service for Rclone mount."""
         service_content = """[Unit]
@@ -999,37 +839,159 @@ echo "Backup completed successfully."
         self.run_command("crontab -u root /tmp/horilla-crontab")
         self.run_command("rm /tmp/horilla-crontab")
 
+    def install(self):
+        """Main installation method."""
+        try:
+            print("Starting Horilla HRMS installation...")
+            
+            # Check system requirements
+            if not self.check_system_requirements():
+                return False
+            
+            # Validate inputs
+            if not self.validate_inputs():
+                return False
+                
+            # Install dependencies
+            if not self.install_dependencies():
+                return False
+                
+            # Clone repository
+            if not self.setup_horilla():
+                return False
+                
+            # Configure settings
+            if not self.configure_settings():
+                return False
+                
+            # Set up Docker
+            if not self.initialize_application():
+                return False
+                
+            # Set up backup system if enabled
+            if self.enable_backups:
+                if not self.setup_backup_system():
+                    print("Warning: Backup system setup failed, but installation will continue.")
+                    # Don't return False here, as we want the installation to continue even if backup setup fails
+            
+            print("\n✅ Horilla HRMS installation completed successfully!")
+            print(f"You can access your Horilla HRMS instance at: https://{self.domain}")
+            print(f"Admin username: {self.admin_username}")
+            print(f"Admin password: {self.admin_password}")
+            
+            return True
+        except Exception as e:
+            print(f"❌ Installation failed: {str(e)}")
+            traceback.print_exc()
+            return False
+
     def run(self):
         """Run the complete installation process."""
         print("=" * 60)
         print("Horilla HRMS Automated Installation")
         print("=" * 60)
         
-        steps = [
-            self.check_system_requirements,
-            self.install_dependencies,
-            self.setup_horilla,
-            self.configure_settings,
-            self.initialize_application
-        ]
+        # Now using install() method which handles the entire process
+        success = self.install()
         
-        for step in steps:
-            if not step():
-                print("\n❌ Installation failed at step:", step.__name__)
+        if success:
+            print("\n" + "=" * 60)
+            print("✅ Installation completed successfully!")
+            print(f"You can now access Horilla HRMS at: https://{self.domain}")
+            print(f"Admin username: {self.admin_username}")
+            print(f"Admin password: {self.admin_password}")
+            print("=" * 60)
+        
+        return success
+
+    def validate_backup_settings(self):
+        """Validate backup system settings."""
+        if self.enable_backups:
+            if not self.s3_access_key:
+                print("S3 Access Key is required for backups.")
                 return False
                 
-        if self.enable_backups:
-            if not self.setup_backup_system():
-                print("Warning: Backup system setup failed, but installation will continue.")
-                # Don't return False here, as we want the installation to continue even if backup setup fails
-        
-        print("\n" + "=" * 60)
-        print("✅ Installation completed successfully!")
-        print(f"You can now access Horilla HRMS at: https://{self.domain}")
-        print(f"Admin username: {self.admin_username}")
-        print("=" * 60)
-        
+            if not self.s3_secret_key:
+                print("S3 Secret Key is required for backups.")
+                return False
+                
+            if not self.s3_bucket_name:
+                print("S3 Bucket Name is required for backups.")
+                return False
+            
+            # Validate region based on provider
+            if self.s3_provider == "aws":
+                # List of valid AWS regions
+                valid_aws_regions = [
+                    "us-east-1", "us-east-2", "us-west-1", "us-west-2", 
+                    "af-south-1", "ap-east-1", "ap-south-1", "ap-northeast-1", 
+                    "ap-northeast-2", "ap-northeast-3", "ap-southeast-1", 
+                    "ap-southeast-2", "ca-central-1", "eu-central-1", 
+                    "eu-west-1", "eu-west-2", "eu-west-3", "eu-south-1", 
+                    "eu-north-1", "me-south-1", "sa-east-1"
+                ]
+                
+                # Case-insensitive comparison
+                if self.s3_region.lower() not in [r.lower() for r in valid_aws_regions]:
+                    # Not a critical error, just print a warning
+                    print(f"Warning: '{self.s3_region}' may not be a valid AWS region. "
+                          f"Common regions include: us-east-1, us-west-2, eu-west-1, etc.")
+                    print("Continuing with the provided region...")
+                
+            if self.backup_frequency not in ['daily', 'weekly', 'monthly']:
+                print("Invalid backup frequency. Must be 'daily', 'weekly', or 'monthly'.")
+                return False
+                
         return True
+
+    def configure_rclone(self):
+        """Configure Rclone with S3 credentials."""
+        # Create rclone config file
+        config_dir = "/root/.config/rclone"
+        self.run_command(f"mkdir -p {config_dir}")
+        
+        # Determine provider type and endpoint
+        provider_type = "s3"
+        provider_endpoint = ""
+        
+        if self.s3_provider == "wasabi":
+            provider_endpoint = f"s3.{self.s3_region}.wasabisys.com"
+        elif self.s3_provider == "b2":
+            provider_type = "b2"
+        elif self.s3_provider == "digitalocean":
+            provider_endpoint = f"{self.s3_region}.digitaloceanspaces.com"
+        elif self.s3_provider == "other":
+            # For other providers, we'd need more info, but we'll use a generic S3 config
+            pass
+        
+        # Create config content
+        config_content = "[s3backup]\n"
+        
+        if provider_type == "s3":
+            config_content += "type = s3\n"
+            config_content += f"access_key_id = {self.s3_access_key}\n"
+            config_content += f"secret_access_key = {self.s3_secret_key}\n"
+            config_content += f"region = {self.s3_region}\n"
+            
+            if provider_endpoint:
+                config_content += f"endpoint = {provider_endpoint}\n"
+        elif provider_type == "b2":
+            config_content += "type = b2\n"
+            config_content += f"account = {self.s3_access_key}\n"
+            config_content += f"key = {self.s3_secret_key}\n"
+        
+        # Write config file
+        with open(f"{config_dir}/rclone.conf", "w") as f:
+            f.write(config_content)
+            
+        # Ensure bucket exists by creating it if it doesn't
+        try:
+            self.run_command(f"rclone mkdir s3backup:{self.s3_bucket_name}/horilla-backups")
+            return True
+        except Exception as e:
+            print(f"Error configuring rclone: {str(e)}")
+            print("Please check your S3 credentials and region.")
+            return False
 
 
 def parse_args():
@@ -1061,9 +1023,8 @@ def main():
     args = parse_args()
     
     # Check if running in non-interactive mode
-    is_tty = sys.stdin.isatty()
-    if not is_tty and not args.non_interactive:
-        print("Detected non-interactive environment. Enabling force-continue mode automatically.")
+    if not sys.stdin.isatty():
+        print("Detected non-interactive environment.")
         args.non_interactive = True
         args.force_continue = True
     
@@ -1072,23 +1033,9 @@ def main():
     
     success = installer.run()
     
-    if success:
-        print("\n============================================================")
-        print("🎉 Horilla HRMS installed successfully! 🎉")
-        print("============================================================")
-        print(f"You can access your Horilla HRMS instance at: http://{installer.domain}")
-        if not installer.domain.endswith('.nip.io'):
-            print(f"or with HTTPS at: https://{installer.domain}")
-        print("\nAdmin credentials:")
-        print(f"  Username: {installer.admin_username}")
-        print(f"  Password: {installer.admin_password}")
-        print("\nIMPORTANT: For security reasons, please change the admin password after first login.")
-        print("============================================================")
-        return 0
-    else:
-        print("\n❌ Installation failed.")
-        print("Please check the error messages above and try again.")
-        return 1
+    # Return status code
+    return 0 if success else 1
+
 
 if __name__ == "__main__":
     sys.exit(main())
