@@ -157,13 +157,13 @@ class HorillaInstaller:
                 if not self.force_continue:
                     print("Use --force-continue to run on unsupported distributions")
                     return False
-                print("Continuing anyway as --force-continue is set")
+                print("Continuing anyway as --force-continue is set.")
         except:
             print("Warning: Could not determine distribution. This script is designed for Ubuntu or Debian.")
             if not self.force_continue:
                 print("Use --force-continue to run on unsupported distributions")
                 return False
-            print("Continuing anyway as --force-continue is set")
+            print("Continuing anyway as --force-continue is set.")
             
         # Check if Docker is installed and running
         docker_installed = False
@@ -1207,6 +1207,86 @@ echo "Backup completed successfully."
         print(f"✓ Email '{email}' format is valid")
         return True
 
+    def initialize_application(self):
+        """
+        Initialize the Horilla application with required settings.
+        
+        This includes:
+        - Building Docker images
+        - Starting Docker containers
+        - Running database migrations
+        - Creating a superuser
+        - Setting up initial data
+        """
+        print("\n[5/8] Initializing application...")
+        
+        try:
+            # Change to the installation directory
+            os.chdir(self.install_dir)
+            
+            # Start Docker containers
+            print("Starting Docker containers...")
+            success, output = self.run_command("docker-compose up -d", shell=True, timeout=300)
+            if not success:
+                print(f"Failed to start Docker containers: {output}")
+                if not self.force_continue:
+                    return False
+                print("Continuing anyway as --force-continue is set.")
+            else:
+                print("✓ Docker containers started successfully")
+            
+            # Wait a moment for the web container to be ready
+            print("Waiting for web container to be ready...")
+            time.sleep(10)
+            
+            # Run migrations
+            print("Running database migrations...")
+            success, output = self.run_command("docker-compose exec -T web python manage.py migrate", shell=True, timeout=120)
+            if not success:
+                print(f"Failed to run migrations: {output}")
+                if not self.force_continue:
+                    return False
+                print("Continuing anyway as --force-continue is set.")
+            else:
+                print("✓ Database migrations completed successfully")
+            
+            # Create superuser
+            print(f"Creating admin user: {self.admin_username}")
+            # Use the admin_username, admin_email, and admin_password from self
+            admin_email = self.email
+            cmd = f"echo 'from django.contrib.auth import get_user_model; User = get_user_model(); User.objects.create_superuser(\\\"{self.admin_username}\\\", \\\"{admin_email}\\\", \\\"{self.admin_password}\\\")' | python manage.py shell"
+            success, output = self.run_command(f"docker-compose exec -T web bash -c '{cmd}'", shell=True, timeout=60)
+            if not success:
+                print(f"Failed to create superuser: {output}")
+                # Check if the error is because the user already exists
+                if "already exists" in output:
+                    print("Admin user already exists, skipping creation")
+                elif not self.force_continue:
+                    return False
+                else:
+                    print("Continuing anyway as --force-continue is set.")
+            else:
+                print(f"✓ Created admin user: {self.admin_username}")
+            
+            # Collect static files
+            print("Collecting static files...")
+            success, output = self.run_command("docker-compose exec -T web python manage.py collectstatic --noinput", shell=True, timeout=60)
+            if not success:
+                print(f"Failed to collect static files: {output}")
+                if not self.force_continue:
+                    return False
+                print("Continuing anyway as --force-continue is set.")
+            else:
+                print("✓ Static files collected successfully")
+            
+            print("✓ Application initialized successfully")
+            return True
+            
+        except Exception as e:
+            print(f"❌ Failed to initialize application: {str(e)}")
+            traceback.print_exc()
+            return False
+            
     def validate_backup_settings(self):
         """Validate backup system settings."""
         if self.enable_backups:
