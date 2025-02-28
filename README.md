@@ -49,6 +49,33 @@ Available parameters:
 - `--install-dir`: Installation directory (default: /root/horilla)
 - `--force-continue`: Continue installation even if apt is locked
 
+### Backup System Parameters
+
+The installer supports setting up an automated backup system using Rclone and BorgBackup:
+
+- `--enable-backups`: Enable automated backups (yes/no, default: no)
+- `--s3-provider`: S3 provider (aws, wasabi, b2, digitalocean, other, default: aws)
+- `--s3-access-key`: S3 Access Key
+- `--s3-secret-key`: S3 Secret Key
+- `--s3-region`: S3 Region (default: us-east-1)
+- `--s3-bucket-name`: S3 Bucket Name
+- `--backup-frequency`: Backup frequency (daily, weekly, monthly, default: daily)
+
+Example with backup system enabled:
+
+```bash
+sudo curl -s https://raw.githubusercontent.com/MNylif/hrms-horilla/main/install.sh | sudo bash -s -- \
+  --domain hrms.example.com \
+  --email admin@example.com \
+  --enable-backups yes \
+  --s3-provider aws \
+  --s3-access-key YOUR_ACCESS_KEY \
+  --s3-secret-key YOUR_SECRET_KEY \
+  --s3-region us-east-1 \
+  --s3-bucket-name your-backup-bucket \
+  --backup-frequency daily
+```
+
 ## Manual Installation with Docker and SSL
 
 ## Prerequisites

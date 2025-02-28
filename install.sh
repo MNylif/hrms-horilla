@@ -25,6 +25,13 @@ DEFAULT_DOMAIN="horilla.${SERVER_IP}.nip.io"
 DEFAULT_EMAIL="admin@example.com"
 DEFAULT_ADMIN_USER="admin"
 DEFAULT_ADMIN_PASSWORD="Admin@123"
+DEFAULT_ENABLE_BACKUPS="no"
+DEFAULT_S3_PROVIDER="aws"
+DEFAULT_S3_ACCESS_KEY=""
+DEFAULT_S3_SECRET_KEY=""
+DEFAULT_S3_REGION="us-east-1"
+DEFAULT_S3_BUCKET_NAME=""
+DEFAULT_BACKUP_FREQUENCY="daily"
 
 # Check if we're running in a pipe (non-interactive)
 if [ ! -t 0 ]; then
@@ -33,6 +40,7 @@ if [ ! -t 0 ]; then
     echo "  Email: $DEFAULT_EMAIL"
     echo "  Admin Username: $DEFAULT_ADMIN_USER"
     echo "  Admin Password: $DEFAULT_ADMIN_PASSWORD"
+    echo "  Enable Backups: $DEFAULT_ENABLE_BACKUPS"
     echo
     echo "You can change these settings later by editing the configuration files."
     echo "For security, please change the admin password after installation."
@@ -53,6 +61,10 @@ if [ ! -t 0 ]; then
     
     if ! echo "$*" | grep -q -- "--admin-password"; then
         DEFAULT_ARGS="$DEFAULT_ARGS --admin-password $DEFAULT_ADMIN_PASSWORD"
+    fi
+    
+    if ! echo "$*" | grep -q -- "--enable-backups"; then
+        DEFAULT_ARGS="$DEFAULT_ARGS --enable-backups $DEFAULT_ENABLE_BACKUPS"
     fi
     
     # Always add non-interactive and force-continue flags
@@ -98,13 +110,72 @@ else
     read -p "Installation directory [/root/horilla]: " INSTALL_DIR
     INSTALL_DIR=${INSTALL_DIR:-/root/horilla}
     
+    # Backup system
+    echo
+    echo "Backup System Configuration:"
+    echo "Horilla can be configured with an automated backup system using Rclone and BorgBackup."
+    echo "This will back up your database and application files to an S3-compatible storage."
+    echo
+    read -p "Enable automated backups? (yes/no) [${DEFAULT_ENABLE_BACKUPS}]: " ENABLE_BACKUPS
+    ENABLE_BACKUPS=${ENABLE_BACKUPS:-$DEFAULT_ENABLE_BACKUPS}
+    
+    if [ "$ENABLE_BACKUPS" = "yes" ]; then
+        # S3 provider
+        echo
+        echo "S3 Provider options:"
+        echo "1. AWS S3"
+        echo "2. Wasabi"
+        echo "3. Backblaze B2"
+        echo "4. DigitalOcean Spaces"
+        echo "5. Other S3-compatible"
+        read -p "Select S3 provider (1-5) [1]: " S3_PROVIDER_OPTION
+        S3_PROVIDER_OPTION=${S3_PROVIDER_OPTION:-1}
+        
+        case $S3_PROVIDER_OPTION in
+            1) S3_PROVIDER="aws" ;;
+            2) S3_PROVIDER="wasabi" ;;
+            3) S3_PROVIDER="b2" ;;
+            4) S3_PROVIDER="digitalocean" ;;
+            5) S3_PROVIDER="other" ;;
+            *) S3_PROVIDER="aws" ;;
+        esac
+        
+        # S3 credentials
+        read -p "S3 Access Key: " S3_ACCESS_KEY
+        read -p "S3 Secret Key: " S3_SECRET_KEY
+        read -p "S3 Region [${DEFAULT_S3_REGION}]: " S3_REGION
+        S3_REGION=${S3_REGION:-$DEFAULT_S3_REGION}
+        read -p "S3 Bucket Name: " S3_BUCKET_NAME
+        
+        # Backup frequency
+        echo
+        echo "Backup Frequency options:"
+        echo "1. Daily (at 2 AM)"
+        echo "2. Weekly (Sundays at 2 AM)"
+        echo "3. Monthly (1st day of month at 2 AM)"
+        read -p "Select backup frequency (1-3) [1]: " BACKUP_FREQUENCY_OPTION
+        BACKUP_FREQUENCY_OPTION=${BACKUP_FREQUENCY_OPTION:-1}
+        
+        case $BACKUP_FREQUENCY_OPTION in
+            1) BACKUP_FREQUENCY="daily" ;;
+            2) BACKUP_FREQUENCY="weekly" ;;
+            3) BACKUP_FREQUENCY="monthly" ;;
+            *) BACKUP_FREQUENCY="daily" ;;
+        esac
+        
+        # Add backup parameters
+        BACKUP_ARGS="--enable-backups yes --s3-provider $S3_PROVIDER --s3-access-key $S3_ACCESS_KEY --s3-secret-key $S3_SECRET_KEY --s3-region $S3_REGION --s3-bucket-name $S3_BUCKET_NAME --backup-frequency $BACKUP_FREQUENCY"
+    else
+        BACKUP_ARGS="--enable-backups no"
+    fi
+    
     echo
     echo "Thank you! The installation will now proceed automatically without further prompts."
     echo "This may take 10-20 minutes depending on your system."
     echo
     
     # Set all arguments for non-interactive mode
-    DEFAULT_ARGS="--domain $DOMAIN --email $EMAIL --admin-username $ADMIN_USER --admin-password $ADMIN_PASSWORD --install-dir $INSTALL_DIR --non-interactive --force-continue"
+    DEFAULT_ARGS="--domain $DOMAIN --email $EMAIL --admin-username $ADMIN_USER --admin-password $ADMIN_PASSWORD --install-dir $INSTALL_DIR $BACKUP_ARGS --non-interactive --force-continue"
 fi
 
 # Create temporary directory

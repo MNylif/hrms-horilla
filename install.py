@@ -18,25 +18,31 @@ import time
 import argparse
 import signal
 from pathlib import Path
+import traceback
 
 
 class HorillaInstaller:
-    def __init__(self, domain=None, email=None, admin_username=None, admin_password=None, 
-                 install_dir=None, db_name="horilla", db_user="horilla", db_password="horilla",
-                 non_interactive=False, force_continue=False, skip_upgrade=False, is_tty=False):
+    def __init__(self, args):
         """Initialize the installer with configuration parameters."""
-        self.domain = domain
-        self.email = email
-        self.admin_username = admin_username
-        self.admin_password = admin_password
-        self.install_dir = install_dir or "/root/horilla"
-        self.db_name = db_name
-        self.db_user = db_user
-        self.db_password = db_password
-        self.non_interactive = non_interactive
-        self.force_continue = force_continue
-        self.skip_upgrade = skip_upgrade
-        self.is_tty = is_tty
+        self.domain = args.domain
+        self.email = args.email
+        self.admin_username = args.admin_username
+        self.admin_password = args.admin_password
+        self.install_dir = args.install_dir
+        self.non_interactive = args.non_interactive
+        self.force_continue = args.force_continue
+        
+        # Backup system settings
+        self.enable_backups = args.enable_backups.lower() == 'yes'
+        self.s3_provider = args.s3_provider
+        self.s3_access_key = args.s3_access_key
+        self.s3_secret_key = args.s3_secret_key
+        self.s3_region = args.s3_region
+        self.s3_bucket_name = args.s3_bucket_name
+        self.backup_frequency = args.backup_frequency
+        
+        # Determine if we're running in a TTY
+        self.is_tty = sys.stdout.isatty() and not self.non_interactive
         
         # Setup signal handler for graceful exit
         signal.signal(signal.SIGINT, self._signal_handler)
@@ -529,9 +535,9 @@ class HorillaInstaller:
 SECRET_KEY=django-insecure-h-gx@tn3=o4a7z^&)sgd3pd4ov0$d2s-wj)n+_r)a=@q^7+r6n
 ALLOWED_HOSTS=localhost,127.0.0.1,{self.domain}
 DB_ENGINE=django.db.backends.postgresql
-DB_NAME={self.db_name}
-DB_USER={self.db_user}
-DB_PASSWORD={self.db_password}
+DB_NAME=horilla
+DB_USER=horilla
+DB_PASSWORD=horilla
 DB_HOST=db
 DB_PORT=5432
 """
@@ -551,9 +557,9 @@ services:
     volumes:
       - postgres_data:/var/lib/postgresql/data/
     environment:
-      - POSTGRES_USER={self.db_user}
-      - POSTGRES_PASSWORD={self.db_password}
-      - POSTGRES_DB={self.db_name}
+      - POSTGRES_USER=horilla
+      - POSTGRES_PASSWORD=horilla
+      - POSTGRES_DB=horilla
     restart: always
 
   web:
@@ -755,6 +761,244 @@ else:
         print("✓ Application initialized successfully")
         return True
 
+    def validate_inputs(self):
+        """Validate all input parameters."""
+        # Validate domain
+        if not self.validate_domain(self.domain):
+            return False
+            
+        # Validate email
+        if not self.validate_email(self.email):
+            return False
+            
+        # Validate admin username
+        if not self.admin_username:
+            print("Admin username cannot be empty.")
+            return False
+            
+        # Validate admin password
+        if not self.admin_password:
+            print("Admin password cannot be empty.")
+            return False
+            
+        # Validate backup settings if enabled
+        if self.enable_backups:
+            if not self.validate_backup_settings():
+                return False
+                
+        return True
+        
+    def validate_backup_settings(self):
+        """Validate backup system settings."""
+        if self.enable_backups:
+            if not self.s3_access_key:
+                print("S3 Access Key is required for backups.")
+                return False
+                
+            if not self.s3_secret_key:
+                print("S3 Secret Key is required for backups.")
+                return False
+                
+            if not self.s3_bucket_name:
+                print("S3 Bucket Name is required for backups.")
+                return False
+                
+            if self.backup_frequency not in ['daily', 'weekly', 'monthly']:
+                print("Invalid backup frequency. Must be 'daily', 'weekly', or 'monthly'.")
+                return False
+                
+        return True
+
+    def setup_backup_system(self):
+        """Set up the backup system with Rclone and BorgBackup."""
+        print("\n📦 Setting up backup system...")
+        
+        try:
+            # Install Rclone
+            print("Installing Rclone...")
+            self.run_command("curl https://rclone.org/install.sh | bash")
+            
+            # Install BorgBackup
+            print("Installing BorgBackup...")
+            self.run_command("apt-get install -y borgbackup")
+            
+            # Configure Rclone
+            print("Configuring Rclone...")
+            self.configure_rclone()
+            
+            # Create mount point
+            print("Creating S3 mount point...")
+            self.run_command("mkdir -p /mnt/s3backup")
+            
+            # Create Rclone mount service
+            print("Creating Rclone mount service...")
+            self.create_rclone_service()
+            
+            # Create backup script
+            print("Creating backup script...")
+            self.create_backup_script()
+            
+            # Set up cron job
+            print("Setting up backup schedule...")
+            self.setup_backup_schedule()
+            
+            print("✓ Backup system setup completed successfully!")
+            return True
+        except Exception as e:
+            print(f"❌ Backup system setup failed: {str(e)}")
+            traceback.print_exc()
+            return False
+            
+    def configure_rclone(self):
+        """Configure Rclone with S3 credentials."""
+        # Create rclone config file
+        config_dir = "/root/.config/rclone"
+        self.run_command(f"mkdir -p {config_dir}")
+        
+        # Determine provider type and endpoint
+        provider_type = "s3"
+        provider_endpoint = ""
+        
+        if self.s3_provider == "wasabi":
+            provider_endpoint = f"s3.{self.s3_region}.wasabisys.com"
+        elif self.s3_provider == "b2":
+            provider_type = "b2"
+        elif self.s3_provider == "digitalocean":
+            provider_endpoint = f"{self.s3_region}.digitaloceanspaces.com"
+        elif self.s3_provider == "other":
+            # For other providers, we'd need more info, but we'll use a generic S3 config
+            pass
+        
+        # Create config content
+        config_content = "[s3backup]\n"
+        
+        if provider_type == "s3":
+            config_content += "type = s3\n"
+            config_content += f"access_key_id = {self.s3_access_key}\n"
+            config_content += f"secret_access_key = {self.s3_secret_key}\n"
+            config_content += f"region = {self.s3_region}\n"
+            
+            if provider_endpoint:
+                config_content += f"endpoint = {provider_endpoint}\n"
+        elif provider_type == "b2":
+            config_content += "type = b2\n"
+            config_content += f"account = {self.s3_access_key}\n"
+            config_content += f"key = {self.s3_secret_key}\n"
+        
+        # Write config file
+        with open(f"{config_dir}/rclone.conf", "w") as f:
+            f.write(config_content)
+            
+        # Test connection
+        self.run_command(f"rclone mkdir s3backup:{self.s3_bucket_name}/horilla-backups")
+            
+    def create_rclone_service(self):
+        """Create systemd service for Rclone mount."""
+        service_content = """[Unit]
+Description=RClone S3 Mount
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/rclone mount s3backup:{bucket_name} /mnt/s3backup \\
+  --allow-other \\
+  --buffer-size 32M \\
+  --dir-cache-time 72h \\
+  --log-level INFO \\
+  --vfs-cache-mode writes \\
+  --vfs-cache-max-size 1G \\
+  --vfs-read-chunk-size 64M
+
+ExecStop=/bin/fusermount -uz /mnt/s3backup
+Restart=on-failure
+RestartSec=30
+
+[Install]
+WantedBy=multi-user.target
+""".format(bucket_name=self.s3_bucket_name)
+
+        # Write service file
+        with open("/etc/systemd/system/rclone-mount.service", "w") as f:
+            f.write(service_content)
+            
+        # Enable and start service
+        self.run_command("systemctl daemon-reload")
+        self.run_command("systemctl enable rclone-mount.service")
+        self.run_command("systemctl start rclone-mount.service")
+        
+    def create_backup_script(self):
+        """Create the backup script."""
+        script_content = """#!/bin/bash
+# Horilla Backup Script
+
+# Variables
+TIMESTAMP=$(date +%Y-%m-%d_%H-%M-%S)
+BACKUP_DIR="/tmp/horilla_backup_${TIMESTAMP}"
+BORG_REPO="/mnt/s3backup/{bucket_name}/horilla-backups"
+DB_CONTAINER="horilla_db_1"  # Update this if your container name is different
+DB_USER="postgres"
+DB_NAME="horilla"
+
+# Create temporary backup directory
+mkdir -p "${BACKUP_DIR}"
+
+# Backup the database
+echo "Creating database backup..."
+docker compose -f {install_dir}/docker-compose.yml exec db pg_dump -U ${DB_USER} ${DB_NAME} > "${BACKUP_DIR}/horilla_db.sql"
+
+# Backup application files (excluding .git and other unnecessary files)
+echo "Creating application files backup..."
+tar --exclude='{install_dir}/.git' --exclude='{install_dir}/node_modules' -czf "${BACKUP_DIR}/horilla_files.tar.gz" {install_dir}
+
+# Create borg backup
+echo "Creating borg backup..."
+borg create --stats --progress \\
+    "${BORG_REPO}::horilla-${TIMESTAMP}" \\
+    "${BACKUP_DIR}"
+
+# Clean up temporary files
+echo "Cleaning up temporary files..."
+rm -rf "${BACKUP_DIR}"
+
+# Prune old backups (keep last 7 daily, 4 weekly, and 6 monthly backups)
+echo "Pruning old backups..."
+borg prune --stats --list "${BORG_REPO}" \\
+    --keep-daily=7 \\
+    --keep-weekly=4 \\
+    --keep-monthly=6
+
+echo "Backup completed successfully."
+""".format(bucket_name=self.s3_bucket_name, install_dir=self.install_dir)
+
+        # Write script file
+        with open("/root/backup-horilla.sh", "w") as f:
+            f.write(script_content)
+            
+        # Make script executable
+        self.run_command("chmod +x /root/backup-horilla.sh")
+        
+    def setup_backup_schedule(self):
+        """Set up cron job for backups."""
+        cron_schedule = ""
+        
+        if self.backup_frequency == "daily":
+            cron_schedule = "0 2 * * *"
+        elif self.backup_frequency == "weekly":
+            cron_schedule = "0 2 * * 0"  # Sundays at 2 AM
+        elif self.backup_frequency == "monthly":
+            cron_schedule = "0 2 1 * *"  # 1st day of month at 2 AM
+            
+        # Add cron job
+        cron_job = f"{cron_schedule} /root/backup-horilla.sh > /var/log/horilla-backup.log 2>&1\n"
+        
+        # Write to crontab
+        with open("/tmp/horilla-crontab", "w") as f:
+            f.write(cron_job)
+            
+        self.run_command("crontab -u root /tmp/horilla-crontab")
+        self.run_command("rm /tmp/horilla-crontab")
+
     def run(self):
         """Run the complete installation process."""
         print("=" * 60)
@@ -774,6 +1018,11 @@ else:
                 print("\n❌ Installation failed at step:", step.__name__)
                 return False
                 
+        if self.enable_backups:
+            if not self.setup_backup_system():
+                print("Warning: Backup system setup failed, but installation will continue.")
+                # Don't return False here, as we want the installation to continue even if backup setup fails
+        
         print("\n" + "=" * 60)
         print("✅ Installation completed successfully!")
         print(f"You can now access Horilla HRMS at: https://{self.domain}")
@@ -783,26 +1032,33 @@ else:
         return True
 
 
+def parse_args():
+    """Parse command line arguments."""
+    parser = argparse.ArgumentParser(description='Horilla HRMS Installer')
+    parser.add_argument('--domain', help='Domain name for Horilla HRMS')
+    parser.add_argument('--email', help='Email address for SSL certificates')
+    parser.add_argument('--admin-username', help='Admin username')
+    parser.add_argument('--admin-password', help='Admin password')
+    parser.add_argument('--install-dir', help='Installation directory', default='/root/horilla')
+    parser.add_argument('--non-interactive', action='store_true', help='Run in non-interactive mode')
+    parser.add_argument('--force-continue', action='store_true', help='Continue installation even if apt is locked')
+    parser.add_argument('--skip-upgrade', action='store_true', help='Skip system upgrade')
+    
+    # Backup system arguments
+    parser.add_argument('--enable-backups', help='Enable automated backups (yes/no)', default='no')
+    parser.add_argument('--s3-provider', help='S3 provider (aws, wasabi, b2, digitalocean, other)', default='aws')
+    parser.add_argument('--s3-access-key', help='S3 Access Key')
+    parser.add_argument('--s3-secret-key', help='S3 Secret Key')
+    parser.add_argument('--s3-region', help='S3 Region', default='us-east-1')
+    parser.add_argument('--s3-bucket-name', help='S3 Bucket Name')
+    parser.add_argument('--backup-frequency', help='Backup frequency (daily, weekly, monthly)', default='daily')
+    
+    return parser.parse_args()
+
+
 def main():
     """Main entry point for the installer."""
-    parser = argparse.ArgumentParser(description="Horilla HRMS Installer")
-    
-    # Required parameters (with defaults for non-interactive mode)
-    parser.add_argument("--domain", help="Domain name for Horilla HRMS")
-    parser.add_argument("--email", help="Email address for SSL certificates")
-    parser.add_argument("--admin-username", help="Admin username")
-    parser.add_argument("--admin-password", help="Admin password")
-    
-    # Optional parameters
-    parser.add_argument("--install-dir", default="/root/horilla", help="Installation directory")
-    parser.add_argument("--db-name", default="horilla", help="Database name")
-    parser.add_argument("--db-user", default="horilla", help="Database username")
-    parser.add_argument("--db-password", default="horilla", help="Database password")
-    parser.add_argument("--non-interactive", action="store_true", help="Run in non-interactive mode")
-    parser.add_argument("--force-continue", action="store_true", help="Continue installation even if apt is locked")
-    parser.add_argument("--skip-upgrade", action="store_true", help="Skip system upgrade")
-    
-    args = parser.parse_args()
+    args = parse_args()
     
     # Check if running in non-interactive mode
     is_tty = sys.stdin.isatty()
@@ -812,20 +1068,7 @@ def main():
         args.force_continue = True
     
     # Create and run the installer
-    installer = HorillaInstaller(
-        domain=args.domain,
-        email=args.email,
-        admin_username=args.admin_username,
-        admin_password=args.admin_password,
-        install_dir=args.install_dir,
-        db_name=args.db_name,
-        db_user=args.db_user,
-        db_password=args.db_password,
-        non_interactive=args.non_interactive,
-        force_continue=args.force_continue,
-        skip_upgrade=args.skip_upgrade,
-        is_tty=is_tty
-    )
+    installer = HorillaInstaller(args)
     
     success = installer.run()
     
