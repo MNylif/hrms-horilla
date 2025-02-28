@@ -1171,42 +1171,43 @@ echo "Backup completed successfully at $(date)"
             "2": "Wasabi",
             "3": "Backblaze B2",
             "4": "DigitalOcean Spaces",
-            "5": "Cloudflare R2",
-            "6": "Google Cloud Storage",
-            "7": "Microsoft Azure Blob Storage",
-            "8": "OpenStack Swift",
-            "9": "Minio",
-            "10": "Alibaba Cloud OSS",
-            "11": "IBM COS S3",
-            "12": "Huawei OBS",
-            "13": "Tencent COS",
-            "14": "Oracle Cloud Storage",
-            "15": "Linode Object Storage",
-            "16": "Scaleway",
-            "17": "Storj",
-            "18": "Qiniu",
-            "19": "HDFS",
-            "20": "Local filesystem",
-            "21": "SFTP",
-            "22": "FTP",
-            "23": "HTTP",
-            "24": "WebDAV",
-            "25": "Microsoft OneDrive",
-            "26": "Google Drive",
-            "27": "Dropbox",
-            "28": "pCloud",
-            "29": "Box",
-            "30": "Mega",
-            "31": "Proton Drive",
-            "32": "Jottacloud",
-            "33": "Koofr",
-            "34": "Yandex Disk",
-            "35": "Nextcloud",
-            "36": "ownCloud",
-            "37": "Seafile",
-            "38": "SMB / CIFS",
-            "39": "Ceph",
-            "40": "Other S3 compatible"
+            "5": "Other S3-compatible",
+            "6": "Cloudflare R2",
+            "7": "Google Cloud Storage",
+            "8": "Microsoft Azure Blob Storage",
+            "9": "OpenStack Swift",
+            "10": "Minio",
+            "11": "Alibaba Cloud OSS",
+            "12": "IBM COS S3",
+            "13": "Huawei OBS",
+            "14": "Tencent COS",
+            "15": "Oracle Cloud Storage",
+            "16": "Linode Object Storage",
+            "17": "Scaleway",
+            "18": "Storj",
+            "19": "Qiniu",
+            "20": "HDFS",
+            "21": "Local filesystem",
+            "22": "SFTP",
+            "23": "FTP",
+            "24": "HTTP",
+            "25": "WebDAV",
+            "26": "Microsoft OneDrive",
+            "27": "Google Drive",
+            "28": "Dropbox",
+            "29": "pCloud",
+            "30": "Box",
+            "31": "Mega",
+            "32": "Proton Drive",
+            "33": "Jottacloud",
+            "34": "Koofr",
+            "35": "Yandex Disk",
+            "36": "Nextcloud",
+            "37": "ownCloud",
+            "38": "Seafile",
+            "39": "SMB / CIFS",
+            "40": "Ceph",
+            "41": "Other S3 compatible"
         }
         return providers.get(str(self.s3_provider), "Unknown")
     
@@ -1350,12 +1351,26 @@ echo "Backup completed successfully at $(date)"
         print("  - You can use a custom domain like 'hrms.example.com' (requires DNS setup)")
         print("  - Or use the default .nip.io domain which works without DNS configuration")
         
-        # Get server IP
+        # Get server IP - try multiple methods to ensure we get a valid IPv4 address
         server_ip = "127.0.0.1"
         try:
+            # First try ifconfig.me (most reliable for IPv4)
             success, ip_output = self.run_command("curl -s ifconfig.me", shell=True, timeout=10)
-            if success and ip_output.strip():
+            if success and ip_output.strip() and '.' in ip_output.strip():
                 server_ip = ip_output.strip()
+            else:
+                # Try ipv4.icanhazip.com which guarantees IPv4
+                success, ip_output = self.run_command("curl -s ipv4.icanhazip.com", shell=True, timeout=10)
+                if success and ip_output.strip() and '.' in ip_output.strip():
+                    server_ip = ip_output.strip()
+                else:
+                    # Try to get local IP from interface
+                    try:
+                        success, ip_output = self.run_command("hostname -I | awk '{print $1}'", shell=True, timeout=10)
+                        if success and ip_output.strip() and '.' in ip_output.strip():
+                            server_ip = ip_output.strip()
+                    except:
+                        pass
         except:
             pass
             
@@ -1401,63 +1416,66 @@ echo "Backup completed successfully at $(date)"
         self.enable_backups = enable_backups in ["yes", "y", "true", "1"]
         
         if self.enable_backups:
-            print("\nStorage Provider options:")
-            print("S3-Compatible Storage:")
-            print("1. Amazon S3")
+            # First show the basic S3 providers for backward compatibility
+            print("\nS3 Provider options:")
+            print("1. AWS S3")
             print("2. Wasabi")
             print("3. Backblaze B2")
             print("4. DigitalOcean Spaces")
-            print("5. Cloudflare R2")
-            print("6. Google Cloud Storage")
-            print("7. Microsoft Azure Blob Storage")
-            print("8. OpenStack Swift")
-            print("9. Minio")
-            print("10. Alibaba Cloud OSS")
-            print("11. IBM COS S3")
-            print("12. Huawei OBS")
-            print("13. Tencent COS")
-            print("14. Oracle Cloud Storage")
-            print("15. Linode Object Storage")
-            print("16. Scaleway")
-            print("17. Storj")
-            print("18. Qiniu")
+            print("5. Other S3-compatible")
+            print("\nEnter 'more' to see additional storage providers")
             
-            print("\nOther Storage Types:")
-            print("19. HDFS (Hadoop Distributed Filesystem)")
-            print("20. Local filesystem")
-            print("21. SFTP")
-            print("22. FTP")
-            print("23. HTTP")
-            print("24. WebDAV")
+            provider_choice = input("Select S3 provider (1-5 or 'more'): ").strip()
             
-            print("\nCloud Storage Services:")
-            print("25. Microsoft OneDrive")
-            print("26. Google Drive")
-            print("27. Dropbox")
-            print("28. pCloud")
-            print("29. Box")
-            print("30. Mega")
-            print("31. Proton Drive")
-            print("32. Jottacloud")
-            print("33. Koofr")
-            print("34. Yandex Disk")
+            if provider_choice.lower() == "more":
+                print("\nAdditional storage providers:")
+                print("6. Cloudflare R2")
+                print("7. Google Cloud Storage")
+                print("8. Microsoft Azure Blob Storage")
+                print("9. OpenStack Swift")
+                print("10. Minio")
+                print("11. Alibaba Cloud OSS")
+                print("12. IBM COS S3")
+                print("13. Huawei OBS")
+                print("14. Tencent COS")
+                print("15. Oracle Cloud Storage")
+                print("16. Linode Object Storage")
+                print("17. Scaleway")
+                print("18. Storj")
+                print("19. Qiniu")
+                print("20. HDFS")
+                print("21. Local filesystem")
+                print("22. SFTP")
+                print("23. FTP")
+                print("24. HTTP")
+                print("25. WebDAV")
+                print("26. Microsoft OneDrive")
+                print("27. Google Drive")
+                print("28. Dropbox")
+                print("29. pCloud")
+                print("30. Box")
+                print("31. Mega")
+                print("32. Proton Drive")
+                print("33. Jottacloud")
+                print("34. Koofr")
+                print("35. Yandex Disk")
+                print("36. Nextcloud")
+                print("37. ownCloud")
+                print("38. Seafile")
+                print("39. SMB / CIFS")
+                print("40. Ceph")
+                print("41. Other S3 compatible")
+                
+                provider_choice = input("Select storage provider (6-41): ").strip()
             
-            print("\nSelf-hosted Storage:")
-            print("35. Nextcloud")
-            print("36. ownCloud")
-            print("37. Seafile")
-            print("38. SMB / CIFS")
-            print("39. Ceph")
-            print("40. Other S3-compatible")
-            
-            self.s3_provider = input("Select storage provider (1-40) [1]: ").strip() or "1"
+            self.s3_provider = provider_choice or "1"
             
             # Get credentials based on provider type
             self.s3_access_key = input("Access Key / Account / Username: ").strip()
             self.s3_secret_key = input("Secret Key / API Key / Password: ").strip()
             
             # For certain providers, we need a region or endpoint
-            if self.s3_provider in ["1", "2", "4", "5", "6", "7", "8", "10", "11", "12", "13", "14", "15", "16", "18"]:
+            if self.s3_provider in ["1", "2", "4", "5", "6", "7", "10", "11", "12", "13", "14", "15", "16", "17", "19"]:
                 print("\nCommon AWS regions:")
                 print("  us-east-1 (N. Virginia)")
                 print("  us-east-2 (Ohio)")
@@ -1470,8 +1488,9 @@ echo "Backup completed successfully at $(date)"
                 while True:
                     region = input(f"Region / Endpoint [{self.s3_region}]: ").strip() or self.s3_region
                     if self.validate_s3_region(region):
+                        self.s3_region = region
                         break
-            elif self.s3_provider in ["9", "19", "21", "22", "23", "24", "35", "36", "37", "38"]:
+            elif self.s3_provider in ["9", "20", "22", "23", "24", "25", "36", "37", "38", "39"]:
                 # These need endpoints/hosts instead of regions
                 self.s3_region = input("Server Address / Endpoint URL: ").strip()
             
@@ -1573,47 +1592,49 @@ echo "Backup completed successfully at $(date)"
             self.run_command(f"mkdir -p {config_dir}", shell=True)
             
             # Map provider selection to actual provider name
+            # Maintain backward compatibility with older option numbers
             provider_map = {
                 "1": "s3",          # Amazon S3
                 "2": "s3",          # Wasabi
                 "3": "b2",          # Backblaze B2
-                "4": "s3",          # DigitalOcean Spaces
-                "5": "s3",          # Cloudflare R2
-                "6": "s3",          # Google Cloud Storage
-                "7": "azureblob",   # Microsoft Azure Blob Storage
-                "8": "swift",       # OpenStack Swift
-                "9": "s3",          # Minio
-                "10": "s3",         # Alibaba Cloud OSS
-                "11": "s3",         # IBM COS S3
-                "12": "s3",         # Huawei OBS
-                "13": "s3",         # Tencent COS
-                "14": "s3",         # Oracle Cloud Storage
-                "15": "s3",         # Linode Object Storage
-                "16": "s3",         # Scaleway
-                "17": "storj",      # Storj
-                "18": "s3",         # Qiniu
-                "19": "hdfs",       # HDFS
-                "20": "local",      # Local filesystem
-                "21": "sftp",       # SFTP
-                "22": "ftp",        # FTP
-                "23": "http",       # HTTP
-                "24": "webdav",     # WebDAV
-                "25": "onedrive",   # Microsoft OneDrive
-                "26": "drive",      # Google Drive
-                "27": "dropbox",    # Dropbox
-                "28": "pcloud",     # pCloud
-                "29": "box",        # Box
-                "30": "mega",       # Mega
-                "31": "protondrive", # Proton Drive
-                "32": "jottacloud", # Jottacloud
-                "33": "koofr",      # Koofr
-                "34": "yandex",     # Yandex Disk
-                "35": "webdav",     # Nextcloud
-                "36": "webdav",     # ownCloud
-                "37": "webdav",     # Seafile
-                "38": "smb",        # SMB / CIFS
-                "39": "s3",         # Ceph
-                "40": "s3"          # Other S3 compatible
+                "4": "s3",          # DigitalOcean
+                "5": "s3",          # Other S3 compatible (backward compatibility)
+                "6": "s3",          # Cloudflare R2
+                "7": "s3",          # Google Cloud Storage
+                "8": "azureblob",   # Microsoft Azure Blob Storage
+                "9": "swift",       # OpenStack Swift
+                "10": "s3",         # Minio
+                "11": "s3",         # Alibaba Cloud OSS
+                "12": "s3",         # IBM COS S3
+                "13": "s3",         # Huawei OBS
+                "14": "s3",         # Tencent COS
+                "15": "s3",         # Oracle Cloud Storage
+                "16": "s3",         # Linode Object Storage
+                "17": "s3",         # Scaleway
+                "18": "storj",      # Storj
+                "19": "s3",         # Qiniu
+                "20": "hdfs",       # HDFS
+                "21": "local",      # Local filesystem
+                "22": "sftp",       # SFTP
+                "23": "ftp",        # FTP
+                "24": "http",       # HTTP
+                "25": "webdav",     # WebDAV
+                "26": "onedrive",   # Microsoft OneDrive
+                "27": "drive",      # Google Drive
+                "28": "dropbox",    # Dropbox
+                "29": "pcloud",     # pCloud
+                "30": "box",        # Box
+                "31": "mega",       # Mega
+                "32": "protondrive", # Proton Drive
+                "33": "jottacloud", # Jottacloud
+                "34": "koofr",      # Koofr
+                "35": "yandex",     # Yandex Disk
+                "36": "webdav",     # Nextcloud
+                "37": "webdav",     # ownCloud
+                "38": "webdav",     # Seafile
+                "39": "smb",        # SMB / CIFS
+                "40": "s3",         # Ceph
+                "41": "s3"          # Other S3 compatible
             }
             
             provider_type = provider_map.get(self.s3_provider, "s3")
@@ -1639,7 +1660,7 @@ echo "Backup completed successfully at $(date)"
                 elif self.s3_provider == "9":  # Minio
                     config_content += "provider = Minio\n"
                     config_content += f"endpoint = {self.s3_region}\n"
-                elif self.s3_provider == "10":  # Alibaba Cloud
+                elif self.s3_provider == "10":  # Alibaba
                     config_content += "provider = Alibaba\n"
                     config_content += f"endpoint = oss-{self.s3_region}.aliyuncs.com\n"
                 elif self.s3_provider == "11":  # IBM
@@ -1788,19 +1809,13 @@ def parse_args():
     # Backup options
     parser.add_argument('--enable-backups', help='Enable automated backups (yes/no)', default='no')
     parser.add_argument('--s3-provider', 
-                       help='Storage provider (1-40):\n'
-                             '1=AWS S3, 2=Wasabi, 3=Backblaze B2, 4=DigitalOcean, 5=Cloudflare R2, '
-                             '6=GCS, 7=Azure, 8=OpenStack, 9=Minio, 10=Alibaba, 11=IBM, 12=Huawei, '
-                             '13=Tencent, 14=Oracle, 15=Linode, 16=Scaleway, 17=Storj, 18=Qiniu, '
-                             '19=HDFS, 20=Local, 21=SFTP, 22=FTP, 23=HTTP, 24=WebDAV, 25=OneDrive, '
-                             '26=Google Drive, 27=Dropbox, 28=pCloud, 29=Box, 30=Mega, 31=Proton Drive, '
-                             '32=Jottacloud, 33=Koofr, 34=Yandex, 35=Nextcloud, 36=ownCloud, '
-                             '37=Seafile, 38=SMB, 39=Ceph, 40=Other S3',
-                       default='1')
-    parser.add_argument('--s3-access-key', help='Storage access key/username')
-    parser.add_argument('--s3-secret-key', help='Storage secret key/password')
-    parser.add_argument('--s3-region', help='Storage region/endpoint', default='us-east-1')
-    parser.add_argument('--s3-bucket-name', help='Storage bucket/container name')
+                       help='Storage provider (1-41):\n'
+                             '1=AWS S3, 2=Wasabi, 3=Backblaze B2, 4=DigitalOcean, 5=Other S3 compatible\n'
+                             'For additional providers (6-41), use the interactive installer or see documentation')
+    parser.add_argument('--s3-access-key', help='S3 Access Key')
+    parser.add_argument('--s3-secret-key', help='S3 Secret Key')
+    parser.add_argument('--s3-region', help='S3 Region/Endpoint', default='us-east-1')
+    parser.add_argument('--s3-bucket-name', help='S3 Bucket/Container Name')
     parser.add_argument('--backup-frequency', 
                        help='Backup frequency (1=Daily, 2=Weekly, 3=Monthly)', 
                        default='1')
