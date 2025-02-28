@@ -403,31 +403,70 @@ class HorillaInstaller:
         return True
 
     def setup_horilla(self):
-        """Clone and set up Horilla repository."""
+        """Set up Horilla by cloning the repository and configuring it."""
         print("\n[3/8] Setting up Horilla...")
         
-        # Create installation directory
-        os.makedirs(self.install_dir, exist_ok=True)
+        # Check if the installation directory already exists
+        if os.path.exists(self.install_dir) and os.listdir(self.install_dir):
+            print(f"Installation directory '{self.install_dir}' already exists and is not empty.")
+            
+            if self.is_tty and not self.force_continue:
+                print("Options:")
+                print("  1. Remove existing directory and reinstall (this will delete all data)")
+                print("  2. Use existing installation (may cause issues if partially installed)")
+                print("  3. Abort installation")
+                
+                try:
+                    choice = input("\nEnter your choice (1-3): ").strip()
+                    
+                    if choice == '1':
+                        print(f"Removing existing directory: {self.install_dir}")
+                        success, _ = self.run_command(f"rm -rf {self.install_dir}", shell=True)
+                        if not success:
+                            print(f"Failed to remove directory: {self.install_dir}")
+                            return False
+                    elif choice == '2':
+                        print(f"Using existing installation in: {self.install_dir}")
+                        # Make sure entrypoint.sh is executable
+                        self.run_command(f"chmod +x {self.install_dir}/entrypoint.sh", shell=True)
+                        print("✓ Made entrypoint.sh executable")
+                        print("✓ Horilla setup completed")
+                        return True
+                    else:
+                        print("Aborting installation as requested.")
+                        sys.exit(0)
+                except (EOFError, KeyboardInterrupt):
+                    print("\nInput interrupted. Aborting installation.")
+                    sys.exit(1)
+            else:
+                # In non-interactive or force-continue mode, remove the directory
+                print(f"Removing existing directory for reinstallation: {self.install_dir}")
+                success, _ = self.run_command(f"rm -rf {self.install_dir}", shell=True)
+                if not success:
+                    print(f"Failed to remove directory: {self.install_dir}")
+                    return False
+        
+        # Create parent directory if it doesn't exist
+        parent_dir = os.path.dirname(self.install_dir)
+        if not os.path.exists(parent_dir):
+            os.makedirs(parent_dir, exist_ok=True)
         
         # Clone the repository
         print(f"Cloning Horilla repository to {self.install_dir}...")
         success, output = self.run_command(
             f"git clone https://github.com/horilla-opensource/horilla.git {self.install_dir}",
-            shell=True
+            shell=True,
+            timeout=600
         )
         
         if not success:
             print(f"Failed to clone repository: {output}")
             return False
-            
-        # Make entrypoint executable
-        entrypoint_path = os.path.join(self.install_dir, "entrypoint.sh")
-        if os.path.exists(entrypoint_path):
-            os.chmod(entrypoint_path, 0o755)
-            print("✓ Made entrypoint.sh executable")
-        else:
-            print("Warning: entrypoint.sh not found. This might cause issues later.")
-            
+        
+        # Make entrypoint.sh executable
+        self.run_command(f"chmod +x {self.install_dir}/entrypoint.sh", shell=True)
+        print("✓ Made entrypoint.sh executable")
+        
         print("✓ Horilla setup completed")
         return True
 
