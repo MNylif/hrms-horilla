@@ -121,22 +121,31 @@ class HorillaInstaller:
             print("Continuing anyway as --force-continue is set.")
             
         # Check Docker and Docker Compose
-        docker_services = ["docker.service", "docker.socket"]
         docker_running = False
-        
-        for service in docker_services:
+        try:
+            # Check if docker command is available
+            self.run_command("which docker", shell=True, timeout=10)
+            
+            # Check if docker service is running
             try:
-                status = self.run_command(f"systemctl is-active {service}")
+                status = self.run_command("systemctl is-active docker", shell=True, timeout=10)
                 if "active" in status:
                     docker_running = True
-                    break
             except:
-                pass
-                
-        if not docker_running:
-            print("✓ Docker is not yet installed or running (will be installed)")
-        else:
-            print("✓ Docker is already running")
+                # systemctl might not be available, try alternative method
+                try:
+                    status = self.run_command("service docker status", shell=True, timeout=10)
+                    if "running" in status.lower():
+                        docker_running = True
+                except:
+                    pass
+            
+            if docker_running:
+                print("✓ Docker is already running")
+            else:
+                print("✓ Docker is installed but not running (will be started)")
+        except:
+            print("✓ Docker is not yet installed (will be installed)")
             
         return True
         
@@ -903,6 +912,40 @@ echo "Backup completed successfully."
             print("=" * 60)
         
         return success
+
+    def validate_domain(self, domain):
+        """Validate domain format."""
+        if not domain:
+            print("Domain cannot be empty.")
+            return False
+            
+        # Allow .nip.io domains (automatic DNS)
+        if domain.endswith('.nip.io'):
+            return True
+            
+        # Basic domain validation
+        domain_pattern = r'^([a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,}$'
+        if not re.match(domain_pattern, domain):
+            print("Invalid domain format. Please enter a valid domain (e.g., hrms.example.com).")
+            return False
+        
+        # DNS check is optional since the user might be setting up DNS afterward
+        print(f"✓ Domain '{domain}' format is valid")
+        return True
+        
+    def validate_email(self, email):
+        """Validate email format."""
+        if not email:
+            print("Email cannot be empty.")
+            return False
+            
+        email_pattern = re.compile(r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$')
+        if not email_pattern.match(email):
+            print("Invalid email format. Please enter a valid email address.")
+            return False
+            
+        print(f"✓ Email '{email}' format is valid")
+        return True
 
     def validate_backup_settings(self):
         """Validate backup system settings."""
