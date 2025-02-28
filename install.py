@@ -19,6 +19,7 @@ import argparse
 import signal
 from pathlib import Path
 import traceback
+import secrets
 
 
 class HorillaInstaller:
@@ -32,6 +33,7 @@ class HorillaInstaller:
         self.non_interactive = args.non_interactive
         self.force_continue = args.force_continue
         self.skip_upgrade = args.skip_upgrade if hasattr(args, 'skip_upgrade') else False
+        self.skip_root_check = args.skip_root_check if hasattr(args, 'skip_root_check') else False
         
         # Backup system settings
         self.enable_backups = args.enable_backups.lower() == 'yes'
@@ -59,94 +61,156 @@ class HorillaInstaller:
         sys.exit(0)
 
     def run_command(self, command, shell=False, cwd=None, env=None, timeout=None):
-        """Run a command and return its output."""
-        print(f"Running command (timeout: {timeout or 'None'}s): {command}")
+        """
+        Run a command and get its output.
         
-        # Set default environment variables
-        if env is None:
-            env = os.environ.copy()
+        Args:
+            command: The command to run, as a string or list of arguments
+            shell: If True, run through shell
+            cwd: Current working directory
+            env: Environment variables
+            timeout: Timeout in seconds
             
-        # Set PAGER to cat to avoid interactive pagers
-        env["PAGER"] = "cat"
+        Returns:
+            Tuple of (success, output)
+        """
+        print(f"Running command (timeout: {timeout}s): {command}")
         
         try:
             # Run the command
-            result = subprocess.run(
+            process = subprocess.Popen(
                 command,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
                 shell=shell,
                 cwd=cwd,
                 env=env,
-                capture_output=True,
-                text=True,
-                timeout=timeout
+                universal_newlines=True
             )
             
-            # Check the return code
-            if result.returncode != 0:
-                print(f"Command failed with exit code {result.returncode}")
-                print(f"Error output: {result.stderr}")
-                raise Exception(f"Command failed with exit code {result.returncode}")
-                
-            # Return the output
-            return result.stdout
-        except subprocess.TimeoutExpired:
-            print(f"Command timed out after {timeout} seconds")
-            raise Exception(f"Command timed out after {timeout} seconds")
-        except Exception as e:
-            print(f"Failed to run command: {str(e)}")
-            raise
+            # Wait for the command to complete with timeout
+            stdout, stderr = process.communicate(timeout=timeout)
             
+            # Check if the command was successful (exit code 0)
+            success = process.returncode == 0
+            
+            # Concatenate stdout and stderr with a separator
+            output = stdout
+            
+            # If stderr is not empty, append it to output
+            if stderr:
+                if output:
+                    output += "\n"
+                output += f"Error output: {stderr}"
+            
+            # Print the output for debugging
+            if not success:
+                print(f"Command failed with exit code {process.returncode}")
+                if stderr:
+                    print(f"Error output: {stderr}")
+            
+            return success, output
+            
+        except subprocess.TimeoutExpired:
+            # Kill the process if it times out
+            process.kill()
+            print(f"Command timed out after {timeout} seconds: {command}")
+            return False, f"Command timed out after {timeout} seconds"
+            
+        except FileNotFoundError as e:
+            # Handle file not found error
+            error_message = f"Failed to run command: {str(e)}"
+            print(error_message)
+            return False, error_message
+            
+        except subprocess.SubprocessError as e:
+            # Handle other subprocess errors
+            error_message = f"Failed to run command: {str(e)}"
+            print(error_message)
+            return False, error_message
+            
+        except Exception as e:
+            # Handle any other exceptions
+            error_message = f"Failed to run command: {str(e)}"
+            print(error_message)
+            traceback.print_exc()
+            return False, error_message
+        
     def check_system_requirements(self):
         """Check if system meets all requirements."""
         print("\n[1/8] Checking system requirements...")
         
-        # Check if running on Ubuntu
+        # Check if the script is run as root
+        if os.geteuid() != 0 and not self.skip_root_check:
+            print("❌ This script must be run as root")
+            return False
+            
+        # Check if running on Ubuntu or Debian
         try:
-            # Using lsb_release is more reliable than checking /etc/os-release
-            distribution = self.run_command(["lsb_release", "-is"], timeout=30).strip()
-            if distribution.lower() != "ubuntu":
-                print(f"⚠️ Warning: This installer is optimized for Ubuntu, but detected {distribution}")
-                print("The installation may not work correctly on this distribution.")
+            success, output = self.run_command(["lsb_release", "-is"], timeout=30)
+            if success and "ubuntu" in output.lower():
+                print("✓ Running on Ubuntu")
+            elif success and "debian" in output.lower():
+                print("✓ Running on Debian")
+            else:
+                print(f"Warning: This script is designed for Ubuntu or Debian, but detected: {output}")
                 if not self.force_continue:
-                    print("Use --force-continue to proceed anyway.")
+                    print("Use --force-continue to run on unsupported distributions")
                     return False
-                print("Continuing anyway as --force-continue is set.")
-            else:
-                print(f"✓ Running on {distribution}")
-        except Exception as e:
-            print(f"⚠️ Warning: Failed to detect operating system: {str(e)}")
-            if not self.force_continue:
-                print("Use --force-continue to proceed anyway.")
-                return False
-            print("Continuing anyway as --force-continue is set.")
-            
-        # Check Docker and Docker Compose
-        docker_running = False
-        try:
-            # Check if docker command is available
-            self.run_command("which docker", shell=True, timeout=10)
-            
-            # Check if docker service is running
-            try:
-                status = self.run_command("systemctl is-active docker", shell=True, timeout=10)
-                if "active" in status:
-                    docker_running = True
-            except:
-                # systemctl might not be available, try alternative method
-                try:
-                    status = self.run_command("service docker status", shell=True, timeout=10)
-                    if "running" in status.lower():
-                        docker_running = True
-                except:
-                    pass
-            
-            if docker_running:
-                print("✓ Docker is already running")
-            else:
-                print("✓ Docker is installed but not running (will be started)")
+                print("Continuing anyway as --force-continue is set")
         except:
-            print("✓ Docker is not yet installed (will be installed)")
+            print("Warning: Could not determine distribution. This script is designed for Ubuntu or Debian.")
+            if not self.force_continue:
+                print("Use --force-continue to run on unsupported distributions")
+                return False
+            print("Continuing anyway as --force-continue is set")
             
+        # Check if Docker is installed and running
+        docker_installed = False
+        docker_running = False
+        
+        # Try checking Docker status with systemctl
+        try:
+            success, _ = self.run_command("systemctl is-active docker.service", shell=True)
+            if success:
+                docker_installed = True
+                docker_running = True
+                print("✓ Docker is installed and running")
+            else:
+                # Try socket
+                success, _ = self.run_command("systemctl is-active docker.socket", shell=True)
+                if success:
+                    docker_installed = True
+                    print("✓ Docker is installed but not running (will be started)")
+                else:
+                    # Docker might be installed but not running
+                    success, _ = self.run_command("which docker", shell=True, timeout=10)
+                    if success:
+                        docker_installed = True
+                        print("✓ Docker is installed but not running (will be started)")
+                    else:
+                        print("✓ Docker is not yet installed (will be installed)")
+        except:
+            # Try alternatives for systems without systemctl
+            try:
+                success, _ = self.run_command("service docker status", shell=True)
+                if success:
+                    docker_installed = True
+                    docker_running = True
+                    print("✓ Docker is installed and running")
+                else:
+                    success, _ = self.run_command("which docker", shell=True, timeout=10)
+                    if success:
+                        docker_installed = True
+                        print("✓ Docker is installed but not running (will be started)")
+                    else:
+                        print("✓ Docker is not yet installed or running (will be installed)")
+            except:
+                print("✓ Docker is not yet installed or running (will be installed)")
+                
+        self.docker_installed = docker_installed
+        self.docker_running = docker_running
+        
         return True
         
     def install_dependencies(self):
@@ -183,9 +247,12 @@ class HorillaInstaller:
             "curl",
             "software-properties-common",
             "python3-pip",
+            "python3-full",
+            "python3-venv",
             "nginx",
             "certbot",
-            "python3-certbot-nginx"
+            "python3-certbot-nginx",
+            "git"
         ]
         
         # Add backup tools if backups are enabled
@@ -204,7 +271,7 @@ class HorillaInstaller:
         # Install Docker if not already installed
         try:
             # Check if Docker is already installed
-            self.run_command("docker --version", timeout=10)
+            self.run_command("docker --version", shell=True, timeout=10)
             print("Docker is already installed. Skipping Docker installation.")
         except:
             print("Installing Docker...")
@@ -215,7 +282,23 @@ class HorillaInstaller:
                 self.run_command("curl -fsSL https://download.docker.com/linux/ubuntu/gpg | apt-key add -", shell=True, timeout=30)
                 
                 # Get Ubuntu codename
-                ubuntu_codename = self.run_command("lsb_release -cs", timeout=10).strip()
+                try:
+                    ubuntu_codename = self.run_command("lsb_release -cs", shell=True, timeout=10).strip()
+                except:
+                    # If lsb_release is not available, try to get it from /etc/os-release
+                    try:
+                        os_release = self.run_command("cat /etc/os-release", shell=True, timeout=10)
+                        for line in os_release.split('\n'):
+                            if line.startswith('VERSION_CODENAME='):
+                                ubuntu_codename = line.split('=')[1].strip('"\'')
+                                break
+                        if not ubuntu_codename:
+                            raise Exception("Could not determine Ubuntu codename")
+                    except:
+                        print("Could not determine Ubuntu codename. Using 'focal' as fallback.")
+                        ubuntu_codename = 'focal'
+                
+                print(f"Detected Ubuntu codename: {ubuntu_codename}")
                 
                 # Add Docker repository
                 docker_repo = f"deb [arch=amd64] https://download.docker.com/linux/ubuntu {ubuntu_codename} stable"
@@ -238,85 +321,262 @@ class HorillaInstaller:
                     return False
                 print("Continuing anyway as --force-continue is set.")
                 
-        # Install pip requirements
+        # Install docker-compose using a Python virtual environment to avoid externally-managed environment issues
         try:
-            print("Installing Python dependencies...")
-            self.run_command("pip3 install docker-compose", shell=True, timeout=120)
+            print("Setting up Python virtual environment for dependencies...")
+            venv_path = "/root/horilla_venv"
+            self.run_command(f"python3 -m venv {venv_path}", shell=True, timeout=60)
+            self.run_command(f"{venv_path}/bin/pip install --upgrade pip", shell=True, timeout=60)
+            self.run_command(f"{venv_path}/bin/pip install docker-compose", shell=True, timeout=120)
+            
+            # Create symlink to make docker-compose available system-wide
+            self.run_command(f"ln -sf {venv_path}/bin/docker-compose /usr/local/bin/docker-compose", shell=True)
+            print("Docker Compose installed successfully in virtual environment.")
         except Exception as e:
             print(f"Failed to install Python dependencies: {str(e)}")
-            if not self.force_continue:
-                return False
-            print("Continuing anyway as --force-continue is set.")
+            print("Attempting to install docker-compose package from apt...")
+            try:
+                self.run_command("apt-get install -y docker-compose", shell=True, timeout=120)
+                print("Docker Compose installed successfully from apt.")
+            except Exception as e2:
+                print(f"Failed to install Docker Compose: {str(e2)}")
+                if not self.force_continue:
+                    return False
+                print("Continuing anyway as --force-continue is set.")
             
         print("✓ All dependencies installed successfully.")
         return True
 
     def setup_horilla(self):
-        """Set up Horilla by cloning the repository and configuring it."""
+        """Clone the Horilla repository and prepare the environment."""
         print("\n[3/8] Setting up Horilla...")
         
-        # Check if the installation directory already exists
-        if os.path.exists(self.install_dir) and os.listdir(self.install_dir):
-            print(f"Installation directory '{self.install_dir}' already exists and is not empty.")
-            
-            if self.is_tty and not self.force_continue:
-                print("Options:")
-                print("  1. Remove existing directory and reinstall (this will delete all data)")
-                print("  2. Use existing installation (may cause issues if partially installed)")
-                print("  3. Abort installation")
-                
-                try:
-                    choice = input("\nEnter your choice (1-3): ").strip()
-                    
-                    if choice == '1':
-                        print(f"Removing existing directory: {self.install_dir}")
-                        success, _ = self.run_command(f"rm -rf {self.install_dir}", shell=True)
-                        if not success:
-                            print(f"Failed to remove directory: {self.install_dir}")
-                            return False
-                    elif choice == '2':
-                        print(f"Using existing installation in: {self.install_dir}")
-                        # Make sure entrypoint.sh is executable
-                        self.run_command(f"chmod +x {self.install_dir}/entrypoint.sh", shell=True)
-                        print("✓ Made entrypoint.sh executable")
-                        print("✓ Horilla setup completed")
-                        return True
-                    else:
-                        print("Aborting installation as requested.")
-                        sys.exit(0)
-                except (EOFError, KeyboardInterrupt):
-                    print("\nInput interrupted. Aborting installation.")
-                    sys.exit(1)
-            else:
-                # In non-interactive or force-continue mode, remove the directory
-                print(f"Removing existing directory for reinstallation: {self.install_dir}")
-                success, _ = self.run_command(f"rm -rf {self.install_dir}", shell=True)
-                if not success:
-                    print(f"Failed to remove directory: {self.install_dir}")
-                    return False
-        
-        # Create parent directory if it doesn't exist
-        parent_dir = os.path.dirname(self.install_dir)
-        if not os.path.exists(parent_dir):
-            os.makedirs(parent_dir, exist_ok=True)
-        
-        # Clone the repository
-        print(f"Cloning Horilla repository to {self.install_dir}...")
-        success, output = self.run_command(
-            f"git clone https://github.com/horilla-opensource/horilla.git {self.install_dir}",
-            shell=True,
-            timeout=600
-        )
-        
-        if not success:
-            print(f"Failed to clone repository: {output}")
+        # Create the installation directory if it doesn't exist
+        try:
+            print(f"Creating installation directory: {self.install_dir}")
+            self.run_command(f"mkdir -p {self.install_dir}", shell=True)
+        except Exception as e:
+            print(f"Failed to create installation directory: {str(e)}")
             return False
         
-        # Make entrypoint.sh executable
-        self.run_command(f"chmod +x {self.install_dir}/entrypoint.sh", shell=True)
-        print("✓ Made entrypoint.sh executable")
-        
-        print("✓ Horilla setup completed")
+        # Clone the repository
+        try:
+            print(f"Cloning Horilla repository to {self.install_dir}...")
+            self.run_command(f"git clone https://github.com/horilla-opensource/horilla.git {self.install_dir}", shell=True, timeout=600)
+        except Exception as e:
+            print(f"Failed to clone repository: {str(e)}")
+            if "already exists" in str(e):
+                print("Directory already exists. Checking if it's a git repository...")
+                try:
+                    self.run_command(f"cd {self.install_dir} && git status", shell=True)
+                    print("Git repository found. Pulling latest changes...")
+                    self.run_command(f"cd {self.install_dir} && git pull", shell=True)
+                except:
+                    print("Not a git repository or git pull failed.")
+                    if not self.force_continue:
+                        return False
+                    print("Continuing anyway as --force-continue is set.")
+            elif not self.force_continue:
+                return False
+            else:
+                print("Continuing anyway as --force-continue is set.")
+         
+        # Create .env file
+        try:
+            print("Creating .env file...")
+            env_content = (
+                f"SECRET_KEY=django-insecure-{secrets.token_urlsafe(32)}\n"
+                f"DEBUG=False\n"
+                f"ALLOWED_HOSTS={self.domain},localhost,127.0.0.1\n"
+                f"DATABASE_URL=postgres://horilla:horilla@db:5432/horilla\n"
+                f"CACHE_URL=redis://redis:6379/1\n"
+            )
+            
+            with open(f"{self.install_dir}/.env", "w") as f:
+                f.write(env_content)
+                
+            print("✓ .env file created successfully")
+        except Exception as e:
+            print(f"Failed to create .env file: {str(e)}")
+            if not self.force_continue:
+                return False
+            print("Continuing anyway as --force-continue is set.")
+            
+        # Create docker-compose.yml
+        try:
+            print("Creating docker-compose.yml...")
+            docker_compose_content = """version: '3'
+
+services:
+  db:
+    image: postgres:13
+    volumes:
+      - postgres_data:/var/lib/postgresql/data/
+    environment:
+      - POSTGRES_USER=horilla
+      - POSTGRES_PASSWORD=horilla
+      - POSTGRES_DB=horilla
+    restart: always
+
+  redis:
+    image: redis:6
+    restart: always
+
+  web:
+    build: .
+    restart: always
+    depends_on:
+      - db
+      - redis
+    volumes:
+      - .:/app
+      - static_volume:/app/static
+      - media_volume:/app/media
+
+  nginx:
+    image: nginx:1.19
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/conf.d:/etc/nginx/conf.d
+      - ./nginx/certbot/conf:/etc/letsencrypt
+      - ./nginx/certbot/www:/var/www/certbot
+      - static_volume:/app/static
+      - media_volume:/app/media
+    depends_on:
+      - web
+    restart: always
+
+  certbot:
+    image: certbot/certbot
+    volumes:
+      - ./nginx/certbot/conf:/etc/letsencrypt
+      - ./nginx/certbot/www:/var/www/certbot
+    entrypoint: "/bin/sh -c 'trap exit TERM; while :; do certbot renew; sleep 12h & wait $${!}; done;'"
+
+volumes:
+  postgres_data:
+  static_volume:
+  media_volume:
+"""
+            
+            with open(f"{self.install_dir}/docker-compose.yml", "w") as f:
+                f.write(docker_compose_content)
+                
+            print("✓ docker-compose.yml created successfully")
+        except Exception as e:
+            print(f"Failed to create docker-compose.yml: {str(e)}")
+            if not self.force_continue:
+                return False
+            print("Continuing anyway as --force-continue is set.")
+            
+        # Create Dockerfile
+        try:
+            print("Creating Dockerfile...")
+            dockerfile_content = """FROM python:3.10-slim
+
+WORKDIR /app
+
+ENV PYTHONDONTWRITEBYTECODE 1
+ENV PYTHONUNBUFFERED 1
+
+RUN apt-get update && apt-get install -y \\
+    build-essential \\
+    libpq-dev \\
+    gettext \\
+    git \\
+    && apt-get clean && rm -rf /var/lib/apt/lists/*
+
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+COPY . .
+
+RUN python manage.py collectstatic --noinput
+RUN python manage.py compilemessages
+
+EXPOSE 8000
+
+CMD ["gunicorn", "--bind", "0.0.0.0:8000", "--workers", "3", "horilla.wsgi:application"]
+"""
+            
+            with open(f"{self.install_dir}/Dockerfile", "w") as f:
+                f.write(dockerfile_content)
+                
+            print("✓ Dockerfile created successfully")
+        except Exception as e:
+            print(f"Failed to create Dockerfile: {str(e)}")
+            if not self.force_continue:
+                return False
+            print("Continuing anyway as --force-continue is set.")
+            
+        # Create nginx configuration
+        try:
+            print("Creating Nginx configuration...")
+            
+            # Create directories
+            self.run_command(f"mkdir -p {self.install_dir}/nginx/conf.d", shell=True)
+            self.run_command(f"mkdir -p {self.install_dir}/nginx/certbot/conf", shell=True)
+            self.run_command(f"mkdir -p {self.install_dir}/nginx/certbot/www", shell=True)
+            
+            # Create nginx.conf
+            nginx_conf = f"""server {{
+    listen 80;
+    server_name {self.domain};
+    
+    location /.well-known/acme-challenge/ {{
+        root /var/www/certbot;
+    }}
+    
+    location / {{
+        return 301 https://$host$request_uri;
+    }}
+}}
+
+server {{
+    listen 443 ssl;
+    server_name {self.domain};
+    
+    ssl_certificate /etc/letsencrypt/live/{self.domain}/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/{self.domain}/privkey.pem;
+    
+    # SSL settings
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_prefer_server_ciphers on;
+    ssl_ciphers ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305:DHE-RSA-AES128-GCM-SHA256:DHE-RSA-AES256-GCM-SHA384;
+    
+    # Static files
+    location /static/ {{
+        alias /app/static/;
+    }}
+    
+    location /media/ {{
+        alias /app/media/;
+    }}
+    
+    # Proxy to Django
+    location / {{
+        proxy_pass http://web:8000;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }}
+}}
+"""
+            
+            with open(f"{self.install_dir}/nginx/conf.d/app.conf", "w") as f:
+                f.write(nginx_conf)
+                
+            print("✓ Nginx configuration created successfully")
+        except Exception as e:
+            print(f"Failed to create Nginx configuration: {str(e)}")
+            if not self.force_continue:
+                return False
+            print("Continuing anyway as --force-continue is set.")
+            
+        print("✓ Horilla setup completed successfully")
         return True
 
     def configure_settings(self):
@@ -1048,6 +1308,7 @@ def parse_args():
     parser.add_argument('--non-interactive', action='store_true', help='Run in non-interactive mode')
     parser.add_argument('--force-continue', action='store_true', help='Continue installation even if apt is locked')
     parser.add_argument('--skip-upgrade', action='store_true', help='Skip system upgrade')
+    parser.add_argument('--skip-root-check', action='store_true', help='Skip root check')
     
     # Backup system arguments
     parser.add_argument('--enable-backups', help='Enable automated backups (yes/no)', default='no')
