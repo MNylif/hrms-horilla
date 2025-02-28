@@ -1,6 +1,40 @@
-# Horilla HRMS Installation Guide with Docker and SSL
+# Horilla HRMS Installation Guide
 
-This guide provides step-by-step instructions for installing Horilla HRMS on Ubuntu using Docker Compose with HTTPS support via Let's Encrypt.
+## Automated Installation (Recommended)
+
+The easiest way to install Horilla HRMS is using our automated installer script. This method requires minimal input and handles all the configuration automatically.
+
+### One-Line Installation
+
+```bash
+sudo curl -s https://raw.githubusercontent.com/MNylif/hrms-horilla/main/install.sh | sudo bash
+```
+
+During installation, you'll be prompted for:
+- Your domain name (e.g., hrms.example.com)
+- Your email address (for SSL certificate)
+- Admin username and password
+
+### Non-Interactive Installation
+
+For automated deployments, you can use the non-interactive mode:
+
+```bash
+sudo curl -s https://raw.githubusercontent.com/MNylif/hrms-horilla/main/install.sh | sudo bash -s -- \
+  --domain hrms.example.com \
+  --email your-email@example.com \
+  --admin-username admin \
+  --admin-password your-secure-password \
+  --non-interactive
+```
+
+Additional options:
+- `--install-dir`: Installation directory (default: ~/horilla)
+- `--db-user`: Database username (default: postgres)
+- `--db-password`: Database password (default: postgres)
+- `--db-name`: Database name (default: horilla)
+
+## Manual Installation with Docker and SSL
 
 ## Prerequisites
 
