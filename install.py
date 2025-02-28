@@ -16,6 +16,7 @@ import getpass
 import re
 import time
 import argparse
+import signal
 from pathlib import Path
 
 
@@ -23,7 +24,8 @@ class HorillaInstaller:
     def __init__(self, domain=None, email=None, install_dir=None, 
                  db_user="postgres", db_password="postgres", db_name="horilla",
                  admin_username=None, admin_password=None, non_interactive=False,
-                 skip_upgrade=True, timeout=600, max_retries=5, retry_delay=10):
+                 skip_upgrade=True, timeout=600, max_retries=5, retry_delay=10,
+                 force_continue=False):
         """Initialize the installer with configuration parameters."""
         self.domain = domain
         self.email = email
@@ -38,11 +40,20 @@ class HorillaInstaller:
         self.timeout = timeout
         self.max_retries = max_retries
         self.retry_delay = retry_delay
+        self.force_continue = force_continue
+        
+        # Setup signal handler for graceful exit
+        signal.signal(signal.SIGINT, self._signal_handler)
         
         # Validate if running as root or with sudo
         if os.geteuid() != 0:
             print("This script must be run as root or with sudo privileges.")
             sys.exit(1)
+    
+    def _signal_handler(self, sig, frame):
+        """Handle keyboard interrupts gracefully."""
+        print("\n\nInstallation interrupted by user. Exiting...")
+        sys.exit(0)
 
     def run_command(self, command, shell=False, cwd=None, env=None, timeout=None):
         """Execute a shell command and return the output."""
@@ -83,6 +94,39 @@ class HorillaInstaller:
             print(f"Exception occurred: {e}")
             return False, str(e)
 
+    def check_apt_processes(self):
+        """Check for running apt processes and return details."""
+        cmd = "ps aux | grep -E 'apt|dpkg' | grep -v grep || true"
+        success, output = self.run_command(cmd, shell=True)
+        
+        if not success:
+            return []
+            
+        processes = []
+        for line in output.strip().split('\n'):
+            if line:
+                parts = line.split()
+                if len(parts) >= 2:
+                    pid = parts[1]
+                    command = ' '.join(parts[10:]) if len(parts) > 10 else 'unknown'
+                    processes.append((pid, command))
+        
+        return processes
+
+    def check_process_age(self, pid):
+        """Check how long a process has been running."""
+        cmd = f"ps -o etimes= -p {pid}"
+        success, output = self.run_command(cmd, shell=True)
+        
+        if not success or not output.strip():
+            return None
+            
+        try:
+            seconds = int(output.strip())
+            return seconds
+        except ValueError:
+            return None
+
     def run_apt_command(self, command, timeout=None):
         """Run an apt command with retries for lock issues."""
         for attempt in range(1, self.max_retries + 1):
@@ -90,19 +134,78 @@ class HorillaInstaller:
             
             # Check if it's a lock error
             if not success and ('Could not get lock' in output or 'Unable to acquire' in output or 'dpkg frontend lock' in output):
+                # Extract the PID from the error message if possible
+                pid_match = re.search(r'process (\d+)', output)
+                locking_pid = pid_match.group(1) if pid_match else None
+                
+                # Check for running apt processes
+                apt_processes = self.check_apt_processes()
+                
+                if locking_pid:
+                    # Check how long the locking process has been running
+                    age_seconds = self.check_process_age(locking_pid)
+                    age_minutes = age_seconds // 60 if age_seconds else None
+                    
+                    print(f"\nLock is held by process {locking_pid}")
+                    if age_minutes:
+                        print(f"This process has been running for {age_minutes} minutes.")
+                    
+                    # Print what the process is doing
+                    for pid, cmd in apt_processes:
+                        if pid == locking_pid:
+                            print(f"Process {pid} is running: {cmd}")
+                
+                print("\nRunning apt/dpkg processes:")
+                if apt_processes:
+                    for pid, cmd in apt_processes:
+                        print(f"  PID {pid}: {cmd}")
+                else:
+                    print("  No apt/dpkg processes found (the lock might be stale)")
+                
+                # If we've tried a few times and there's still a lock, ask what to do
+                if attempt >= 3 and not self.force_continue and not self.non_interactive:
+                    print("\nThe system package manager is locked by another process.")
+                    print("Options:")
+                    print("  1. Wait and retry (recommended if a system update is in progress)")
+                    print("  2. Abort installation")
+                    print("  3. Try to continue anyway (may cause issues)")
+                    
+                    choice = input("\nEnter your choice (1-3): ").strip()
+                    
+                    if choice == '2':
+                        print("Aborting installation as requested.")
+                        sys.exit(0)
+                    elif choice == '3':
+                        print("Attempting to continue despite lock issues...")
+                        # Skip this command and proceed
+                        return True, "Skipped due to lock"
+                
                 if attempt < self.max_retries:
-                    print(f"Detected apt/dpkg lock, waiting {self.retry_delay} seconds before retry {attempt}/{self.max_retries}...")
-                    
-                    # First, let's check which process is holding the lock
-                    ps_cmd = "ps aux | grep -E 'apt|dpkg' | grep -v grep || true"
-                    self.run_command(ps_cmd, shell=True)
-                    
-                    # Wait before retrying
+                    print(f"\nWaiting {self.retry_delay} seconds before retry {attempt}/{self.max_retries}...")
                     time.sleep(self.retry_delay)
                     continue
             
             # Either it succeeded or it failed with a non-lock error, or we're out of retries
             return success, output
+        
+        # If we're here, we've exhausted all retries
+        if not self.force_continue and not self.non_interactive:
+            print("\nCould not acquire package manager lock after multiple attempts.")
+            print("Options:")
+            print("  1. Abort installation (recommended)")
+            print("  2. Try to continue anyway (may cause issues)")
+            
+            choice = input("\nEnter your choice (1-2): ").strip()
+            
+            if choice == '2':
+                print("Attempting to continue despite lock issues...")
+                return True, "Skipped due to lock"
+            else:
+                print("Aborting installation as requested.")
+                sys.exit(0)
+        elif self.force_continue:
+            print("Force continue enabled. Skipping this command and proceeding...")
+            return True, "Skipped due to lock (force continue enabled)"
         
         return False, f"Failed after {self.max_retries} attempts: {command}"
 
@@ -517,6 +620,7 @@ def main():
     parser.add_argument("--timeout", type=int, default=600, help="Command execution timeout in seconds (default: 600)")
     parser.add_argument("--max-retries", type=int, default=5, help="Maximum number of retries for apt commands (default: 5)")
     parser.add_argument("--retry-delay", type=int, default=10, help="Delay between retries in seconds (default: 10)")
+    parser.add_argument("--force-continue", action="store_true", help="Force continue even if apt is locked (use with caution)")
     
     args = parser.parse_args()
     
@@ -538,7 +642,8 @@ def main():
         skip_upgrade=args.skip_upgrade,
         timeout=args.timeout,
         max_retries=args.max_retries,
-        retry_delay=args.retry_delay
+        retry_delay=args.retry_delay,
+        force_continue=args.force_continue
     )
     
     if installer.run():

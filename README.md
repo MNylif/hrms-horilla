@@ -42,6 +42,7 @@ All these options can be added to either installation method:
 - `--no-skip-upgrade`: Do not skip system upgrade (by default, apt upgrade is skipped)
 - `--max-retries`: Maximum number of retries for apt commands (default: 5)
 - `--retry-delay`: Delay between retries in seconds (default: 10)
+- `--force-continue`: Force continue even if apt is locked (use with caution)
 
 For example, to use a different database and increase command timeout:
 ```bash
@@ -61,9 +62,16 @@ If you encounter issues during installation:
 2. **Package installation failures due to locks**: The script automatically retries (5 times by default) when it encounters apt/dpkg locks. If you still encounter lock issues, you can:
    - Increase the number of retries: `--max-retries 10`
    - Increase the delay between retries: `--retry-delay 30`
-   - Or manually check what's locking the apt process:
+   - Force continue despite locks: `--force-continue` (use with caution)
+   - Manually check what's locking the apt process:
      ```bash
      ps aux | grep -E 'apt|dpkg' | grep -v grep
+     ```
+   - If there's an unattended upgrade in progress, it's best to wait for it to complete
+   - If you're sure no important apt process is running, you can try:
+     ```bash
+     sudo killall apt apt-get dpkg
+     sudo dpkg --configure -a
      ```
 
 3. **Package installation failures**: Try running these commands manually before installation:

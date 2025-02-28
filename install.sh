@@ -14,6 +14,7 @@ echo "=== Horilla HRMS One-Line Installer ==="
 echo "This script will install Horilla HRMS on your system."
 echo "You will be prompted for necessary information during installation."
 echo "NOTE: The installation process may take 10-20 minutes depending on your system."
+echo "NOTE: If apt is locked by another process, you may need to use the --force-continue option to continue the installation."
 echo ""
 
 # Install Python if not already installed
