@@ -14,6 +14,7 @@ import sys
 import subprocess
 import getpass
 import re
+import json
 import time
 import argparse
 import signal
@@ -58,7 +59,78 @@ class HorillaInstaller:
         if os.geteuid() != 0:
             print("This script must be run as root or with sudo privileges.")
             sys.exit(1)
-    
+        
+        # Load saved configuration if available
+        self.load_saved_config()
+        
+    def load_saved_config(self):
+        """Load saved configuration from file if it exists."""
+        config_file = "/tmp/horilla_install_config.json"
+        if os.path.exists(config_file):
+            try:
+                with open(config_file, 'r') as f:
+                    config = json.load(f)
+                
+                print("\n========================================================================")
+                print("Found saved configuration from previous run. Using saved values as defaults.")
+                print("You can change any values during this installation if needed.")
+                print("========================================================================\n")
+                
+                # Only load values that weren't specified via command line
+                if self.domain is None and 'domain' in config:
+                    self.domain = config.get('domain')
+                if 'email' in config and self.email == "admin@example.com":
+                    self.email = config.get('email')
+                if 'admin_username' in config and self.admin_username == "admin":
+                    self.admin_username = config.get('admin_username')
+                if 'admin_password' in config and self.admin_password == "Admin@123":
+                    self.admin_password = config.get('admin_password')
+                if 'install_dir' in config and self.install_dir == "/opt/horilla":
+                    self.install_dir = config.get('install_dir')
+                
+                # Backup settings
+                if not self.enable_backups and 'enable_backups' in config:
+                    self.enable_backups = config.get('enable_backups')
+                if 's3_provider' in config and self.s3_provider == "1":
+                    self.s3_provider = config.get('s3_provider')
+                if 's3_access_key' in config and not self.s3_access_key:
+                    self.s3_access_key = config.get('s3_access_key')
+                if 's3_secret_key' in config and not self.s3_secret_key:
+                    self.s3_secret_key = config.get('s3_secret_key')
+                if 's3_region' in config and self.s3_region == "us-east-1":
+                    self.s3_region = config.get('s3_region')
+                if 's3_bucket_name' in config and not self.s3_bucket_name:
+                    self.s3_bucket_name = config.get('s3_bucket_name')
+                if 'backup_frequency' in config and self.backup_frequency == "1":
+                    self.backup_frequency = config.get('backup_frequency')
+                    
+            except Exception as e:
+                print(f"Warning: Could not load saved configuration: {e}")
+                
+    def save_config(self):
+        """Save current configuration to file."""
+        config_file = "/tmp/horilla_install_config.json"
+        config = {
+            'domain': self.domain,
+            'email': self.email,
+            'admin_username': self.admin_username,
+            'admin_password': self.admin_password,
+            'install_dir': self.install_dir,
+            'enable_backups': self.enable_backups,
+            's3_provider': self.s3_provider,
+            's3_access_key': self.s3_access_key,
+            's3_secret_key': self.s3_secret_key,
+            's3_region': self.s3_region,
+            's3_bucket_name': self.s3_bucket_name,
+            'backup_frequency': self.backup_frequency
+        }
+        
+        try:
+            with open(config_file, 'w') as f:
+                json.dump(config, f, indent=2)
+        except Exception as e:
+            print(f"Warning: Could not save configuration: {e}")
+
     def _signal_handler(self, sig, frame):
         """Handle keyboard interrupts gracefully."""
         print("\n\nInstallation interrupted by user. Exiting...")
@@ -924,24 +996,25 @@ volumes:
                 return False
             
             # Validate region based on provider
-            if self.s3_provider == "aws":
-                # List of valid AWS regions
-                valid_aws_regions = [
-                    "us-east-1", "us-east-2", "us-west-1", "us-west-2", 
-                    "af-south-1", "ap-east-1", "ap-south-1", "ap-northeast-1", 
-                    "ap-northeast-2", "ap-northeast-3", "ap-southeast-1", 
-                    "ap-southeast-2", "ca-central-1", "eu-central-1", 
-                    "eu-west-1", "eu-west-2", "eu-west-3", "eu-south-1", 
-                    "eu-north-1", "me-south-1", "sa-east-1"
-                ]
+            if self.s3_provider in ["1", "2", "4", "5", "6", "7", "10", "11", "12", "13", "14", "15", "16", "17", "19"]:
+                print("\nCommon AWS regions:")
+                print("  us-east-1 (N. Virginia)")
+                print("  us-east-2 (Ohio)")
+                print("  us-west-1 (N. California)")
+                print("  us-west-2 (Oregon)")
+                print("  eu-west-1 (Ireland)")
+                print("  eu-central-1 (Frankfurt)")
+                print("  ap-northeast-1 (Tokyo)")
                 
-                # Case-insensitive comparison
-                if self.s3_region.lower() not in [r.lower() for r in valid_aws_regions]:
-                    # Not a critical error, just print a warning
-                    print(f"Warning: '{self.s3_region}' may not be a valid AWS region. "
-                          f"Common regions include: us-east-1, us-west-2, eu-west-1, etc.")
-                    print("Continuing with the provided region...")
-                
+                while True:
+                    region = input(f"Region / Endpoint [{self.s3_region}]: ").strip() or self.s3_region
+                    if self.validate_s3_region(region):
+                        self.s3_region = region
+                        break
+            elif self.s3_provider in ["9", "20", "22", "23", "24", "25", "36", "37", "38", "39"]:
+                # These need endpoints/hosts instead of regions
+                self.s3_region = input("Server Address / Endpoint URL: ").strip()
+            
             if self.backup_frequency not in ['daily', 'weekly', 'monthly']:
                 print("Invalid backup frequency. Must be 'daily', 'weekly', or 'monthly'.")
                 return False
@@ -1504,6 +1577,9 @@ echo "Backup completed successfully at $(date)"
         
         print("\nThank you! The installation will now proceed automatically without further prompts.")
         print("This may take 10-20 minutes depending on your system.")
+        
+        # Save configuration for future use
+        self.save_config()
         
         return True
 
