@@ -40,6 +40,8 @@ All these options can be added to either installation method:
 - `--db-name`: Database name (default: horilla)
 - `--timeout`: Command execution timeout in seconds (default: 600)
 - `--no-skip-upgrade`: Do not skip system upgrade (by default, apt upgrade is skipped)
+- `--max-retries`: Maximum number of retries for apt commands (default: 5)
+- `--retry-delay`: Delay between retries in seconds (default: 10)
 
 For example, to use a different database and increase command timeout:
 ```bash
@@ -55,18 +57,27 @@ sudo curl -s https://raw.githubusercontent.com/MNylif/hrms-horilla/main/install.
 If you encounter issues during installation:
 
 1. **Command timeouts**: By default, commands have a 10-minute timeout. If you're on a slow system, increase it with `--timeout 1200` (20 minutes)
-   
-2. **Package installation failures**: Try running these commands manually before installation:
+
+2. **Package installation failures due to locks**: The script automatically retries (5 times by default) when it encounters apt/dpkg locks. If you still encounter lock issues, you can:
+   - Increase the number of retries: `--max-retries 10`
+   - Increase the delay between retries: `--retry-delay 30`
+   - Or manually check what's locking the apt process:
+     ```bash
+     ps aux | grep -E 'apt|dpkg' | grep -v grep
+     ```
+
+3. **Package installation failures**: Try running these commands manually before installation:
    ```bash
    sudo apt-get update
+   sudo dpkg --configure -a
    sudo apt-get install -y apt-transport-https ca-certificates curl software-properties-common
    ```
 
-3. **Network issues**: Ensure your server has stable internet access to download Docker and other components
+4. **Network issues**: Ensure your server has stable internet access to download Docker and other components
 
-4. **Docker issues**: If Docker installation fails, try installing it manually following the [official instructions](https://docs.docker.com/engine/install/ubuntu/)
+5. **Docker issues**: If Docker installation fails, try installing it manually following the [official instructions](https://docs.docker.com/engine/install/ubuntu/)
 
-5. **SSL certificate issues**: Ensure your domain is correctly pointed to your server's IP address before running the installer
+6. **SSL certificate issues**: Ensure your domain is correctly pointed to your server's IP address before running the installer
 
 ## Manual Installation with Docker and SSL
 

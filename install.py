@@ -23,7 +23,7 @@ class HorillaInstaller:
     def __init__(self, domain=None, email=None, install_dir=None, 
                  db_user="postgres", db_password="postgres", db_name="horilla",
                  admin_username=None, admin_password=None, non_interactive=False,
-                 skip_upgrade=True, timeout=600):
+                 skip_upgrade=True, timeout=600, max_retries=5, retry_delay=10):
         """Initialize the installer with configuration parameters."""
         self.domain = domain
         self.email = email
@@ -36,6 +36,8 @@ class HorillaInstaller:
         self.non_interactive = non_interactive
         self.skip_upgrade = skip_upgrade
         self.timeout = timeout
+        self.max_retries = max_retries
+        self.retry_delay = retry_delay
         
         # Validate if running as root or with sudo
         if os.geteuid() != 0:
@@ -80,6 +82,29 @@ class HorillaInstaller:
         except Exception as e:
             print(f"Exception occurred: {e}")
             return False, str(e)
+
+    def run_apt_command(self, command, timeout=None):
+        """Run an apt command with retries for lock issues."""
+        for attempt in range(1, self.max_retries + 1):
+            success, output = self.run_command(command, shell=True, timeout=timeout)
+            
+            # Check if it's a lock error
+            if not success and ('Could not get lock' in output or 'Unable to acquire' in output or 'dpkg frontend lock' in output):
+                if attempt < self.max_retries:
+                    print(f"Detected apt/dpkg lock, waiting {self.retry_delay} seconds before retry {attempt}/{self.max_retries}...")
+                    
+                    # First, let's check which process is holding the lock
+                    ps_cmd = "ps aux | grep -E 'apt|dpkg' | grep -v grep || true"
+                    self.run_command(ps_cmd, shell=True)
+                    
+                    # Wait before retrying
+                    time.sleep(self.retry_delay)
+                    continue
+            
+            # Either it succeeded or it failed with a non-lock error, or we're out of retries
+            return success, output
+        
+        return False, f"Failed after {self.max_retries} attempts: {command}"
 
     def get_user_input(self, prompt, default=None, validate_func=None, password=False):
         """Get user input with validation and default values."""
@@ -147,7 +172,7 @@ class HorillaInstaller:
         
         # Update package index
         print("Updating package index...")
-        success, output = self.run_command("apt-get update -y", shell=True, timeout=300)
+        success, output = self.run_apt_command("apt-get update -y", timeout=300)
         if not success:
             print(f"Failed to update package index: {output}")
             return False
@@ -155,31 +180,83 @@ class HorillaInstaller:
         # Skip apt upgrade if configured
         if not self.skip_upgrade:
             print("Upgrading system packages (this may take a while)...")
-            success, output = self.run_command("DEBIAN_FRONTEND=noninteractive apt-get upgrade -y -q", shell=True, timeout=600)
+            success, output = self.run_apt_command("DEBIAN_FRONTEND=noninteractive apt-get upgrade -y -q", timeout=600)
             if not success:
                 print(f"Warning: System upgrade failed: {output}")
                 print("Continuing with installation...")
         else:
             print("Skipping system upgrade...")
         
+        # First, let's wait for any ongoing apt/dpkg processes to finish
+        print("Waiting for any ongoing apt/dpkg processes to finish...")
+        self.run_command("ps aux | grep -E 'apt|dpkg' | grep -v grep || true", shell=True)
+        
+        # Try to fix any interrupted dpkg installations
+        print("Attempting to fix any interrupted dpkg installations...")
+        self.run_apt_command("DEBIAN_FRONTEND=noninteractive dpkg --configure -a", timeout=300)
+        
         # Install required packages
+        packages = [
+            "apt-transport-https", 
+            "ca-certificates", 
+            "curl", 
+            "software-properties-common",
+            "gnupg",
+            "lsb-release"
+        ]
+        
+        # Install one package at a time to minimize lock issues
+        for package in packages:
+            print(f"Installing {package}...")
+            success, output = self.run_apt_command(f"DEBIAN_FRONTEND=noninteractive apt-get install -y {package}", timeout=300)
+            if not success:
+                print(f"Failed to install {package}: {output}")
+                return False
+        
+        # Set up Docker repository
+        print("Setting up Docker repository...")
         commands = [
-            "apt-get install -y apt-transport-https ca-certificates curl software-properties-common",
             "mkdir -p /etc/apt/keyrings",
             "curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg",
             'echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" | tee /etc/apt/sources.list.d/docker.list > /dev/null',
-            "apt-get update -y",
-            "apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin",
-            "apt-get install -y nginx certbot python3-certbot-nginx"
         ]
         
         for cmd in commands:
-            print(f"Running: {cmd}")
             success, output = self.run_command(cmd, shell=True, timeout=300)
             if not success:
                 print(f"Failed to execute: {cmd}")
                 print(f"Error: {output}")
                 return False
+        
+        # Update package index again after adding Docker repository
+        print("Updating package index with Docker repository...")
+        success, output = self.run_apt_command("apt-get update -y", timeout=300)
+        if not success:
+            print(f"Failed to update package index with Docker repository: {output}")
+            return False
+        
+        # Install Docker packages
+        docker_packages = [
+            "docker-ce",
+            "docker-ce-cli", 
+            "containerd.io", 
+            "docker-buildx-plugin", 
+            "docker-compose-plugin"
+        ]
+        
+        for package in docker_packages:
+            print(f"Installing {package}...")
+            success, output = self.run_apt_command(f"DEBIAN_FRONTEND=noninteractive apt-get install -y {package}", timeout=300)
+            if not success:
+                print(f"Failed to install {package}: {output}")
+                return False
+        
+        # Install Nginx and Certbot
+        print("Installing Nginx and Certbot...")
+        success, output = self.run_apt_command("DEBIAN_FRONTEND=noninteractive apt-get install -y nginx certbot python3-certbot-nginx", timeout=300)
+        if not success:
+            print(f"Failed to install Nginx and Certbot: {output}")
+            return False
                 
         print("✓ Dependencies installed successfully")
         return True
@@ -438,6 +515,8 @@ def main():
     parser.add_argument("--non-interactive", action="store_true", help="Run in non-interactive mode (requires all parameters)")
     parser.add_argument("--no-skip-upgrade", action="store_false", dest="skip_upgrade", help="Do not skip system upgrade (apt upgrade)")
     parser.add_argument("--timeout", type=int, default=600, help="Command execution timeout in seconds (default: 600)")
+    parser.add_argument("--max-retries", type=int, default=5, help="Maximum number of retries for apt commands (default: 5)")
+    parser.add_argument("--retry-delay", type=int, default=10, help="Delay between retries in seconds (default: 10)")
     
     args = parser.parse_args()
     
@@ -457,7 +536,9 @@ def main():
         admin_password=args.admin_password,
         non_interactive=args.non_interactive,
         skip_upgrade=args.skip_upgrade,
-        timeout=args.timeout
+        timeout=args.timeout,
+        max_retries=args.max_retries,
+        retry_delay=args.retry_delay
     )
     
     if installer.run():
