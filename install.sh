@@ -1,21 +1,19 @@
 #!/bin/bash
-# Horilla HRMS One-Line Installer
-# This script downloads and runs the Horilla HRMS installer
 
 set -e
-
-# Check if running as root
-if [ "$EUID" -ne 0 ]; then
-  echo "Please run as root or with sudo"
-  exit 1
-fi
 
 echo "=== Horilla HRMS One-Line Installer ==="
 echo "This script will install Horilla HRMS on your system."
 echo "You will be prompted for necessary information during installation."
 echo "NOTE: The installation process may take 10-20 minutes depending on your system."
 echo "NOTE: If apt is locked by another process, you may need to use the --force-continue option to continue the installation."
-echo ""
+echo
+
+# Check if running as root
+if [ "$EUID" -ne 0 ]; then
+  echo "Please run as root or with sudo"
+  exit 1
+fi
 
 # Install Python if not already installed
 if ! command -v python3 &> /dev/null; then
@@ -24,18 +22,61 @@ if ! command -v python3 &> /dev/null; then
     apt-get install -y python3 python3-pip
 fi
 
+# Get server IP for default domain
+SERVER_IP=$(hostname -I | awk '{print $1}')
+DEFAULT_DOMAIN="horilla.${SERVER_IP}.nip.io"
+DEFAULT_EMAIL="admin@example.com"
+DEFAULT_ADMIN_USER="admin"
+DEFAULT_ADMIN_PASSWORD="Admin@123"
+
+# Check if we're running in a pipe (non-interactive)
+if [ ! -t 0 ]; then
+    echo "Detected non-interactive environment. Using default values:"
+    echo "  Domain: $DEFAULT_DOMAIN"
+    echo "  Email: $DEFAULT_EMAIL"
+    echo "  Admin Username: $DEFAULT_ADMIN_USER"
+    echo "  Admin Password: $DEFAULT_ADMIN_PASSWORD"
+    echo
+    echo "You can change these settings later by editing the configuration files."
+    echo "For security, please change the admin password after installation."
+    echo
+    
+    # Check if domain, email, and admin-password are already provided in arguments
+    if ! echo "$*" | grep -q -- "--domain"; then
+        DEFAULT_ARGS="$DEFAULT_ARGS --domain $DEFAULT_DOMAIN"
+    fi
+    
+    if ! echo "$*" | grep -q -- "--email"; then
+        DEFAULT_ARGS="$DEFAULT_ARGS --email $DEFAULT_EMAIL"
+    fi
+    
+    if ! echo "$*" | grep -q -- "--admin-username"; then
+        DEFAULT_ARGS="$DEFAULT_ARGS --admin-username $DEFAULT_ADMIN_USER"
+    fi
+    
+    if ! echo "$*" | grep -q -- "--admin-password"; then
+        DEFAULT_ARGS="$DEFAULT_ARGS --admin-password $DEFAULT_ADMIN_PASSWORD"
+    fi
+    
+    # Always add non-interactive flag
+    if ! echo "$*" | grep -q -- "--non-interactive"; then
+        DEFAULT_ARGS="$DEFAULT_ARGS --non-interactive"
+    fi
+else
+    DEFAULT_ARGS=""
+fi
+
 # Create temporary directory
 TEMP_DIR=$(mktemp -d)
 cd "$TEMP_DIR"
 
-# Download the installer script
 echo "Downloading installer..."
-curl -s -o install.py https://raw.githubusercontent.com/MNylif/hrms-horilla/main/install.py
-chmod +x install.py
+# Download the installer
+curl -s https://raw.githubusercontent.com/MNylif/hrms-horilla/main/install.py -o install.py
 
 # Run the installer with all provided arguments
 echo "Starting installation..."
-python3 install.py "$@"
+python3 install.py $DEFAULT_ARGS "$@"
 
 # Clean up
 cd - > /dev/null
