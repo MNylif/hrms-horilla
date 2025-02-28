@@ -1,91 +1,37 @@
 # Horilla HRMS Installation Guide
 
-## Automated Installation (Recommended)
+## Quick Installation
 
-The easiest way to install Horilla HRMS is using our automated installer script. This method requires minimal input and handles all the configuration automatically.
-
-### One-Line Installation
+For a completely hands-off installation, run:
 
 ```bash
 sudo curl -s https://raw.githubusercontent.com/MNylif/hrms-horilla/main/install.sh | sudo bash
 ```
 
-During installation, you'll be prompted for:
-- Your domain name (e.g., hrms.example.com)
-- Your email address (for SSL certificate)
-- Admin username and password
-
-The installation process may take 10-20 minutes depending on your system.
-
-### Non-Interactive Installation
-
-For automated deployments, you can use the non-interactive mode:
+This will use default values for all settings. If you want to customize your installation but still have a hands-off process, run:
 
 ```bash
-sudo curl -s https://raw.githubusercontent.com/MNylif/hrms-horilla/main/install.sh | sudo bash -s -- \
-  --domain hrms.example.com \
-  --email your-email@example.com \
-  --admin-username admin \
-  --admin-password your-secure-password \
-  --non-interactive
+sudo bash -c "$(curl -s https://raw.githubusercontent.com/MNylif/hrms-horilla/main/install.sh)"
 ```
 
-### Additional Options
+This will prompt you for all necessary information upfront and then proceed with the installation automatically without any further interaction.
 
-All these options can be added to either installation method:
+## Advanced Installation Options
 
-- `--install-dir`: Installation directory (default: ~/horilla)
-- `--db-user`: Database username (default: postgres)
-- `--db-password`: Database password (default: postgres)
-- `--db-name`: Database name (default: horilla)
-- `--timeout`: Command execution timeout in seconds (default: 600)
-- `--no-skip-upgrade`: Do not skip system upgrade (by default, apt upgrade is skipped)
-- `--max-retries`: Maximum number of retries for apt commands (default: 5)
-- `--retry-delay`: Delay between retries in seconds (default: 10)
-- `--force-continue`: Force continue even if apt is locked (use with caution)
+You can also provide specific parameters to the installation script:
 
-For example, to use a different database and increase command timeout:
 ```bash
-sudo curl -s https://raw.githubusercontent.com/MNylif/hrms-horilla/main/install.sh | sudo bash -s -- \
-  --db-user horilla_user \
-  --db-password secure_password \
-  --db-name horilla_db \
-  --timeout 1200
+sudo curl -s https://raw.githubusercontent.com/MNylif/hrms-horilla/main/install.sh | sudo bash -s -- --domain your-domain.com --email your-email@example.com
 ```
 
-### Troubleshooting
+Available parameters:
 
-If you encounter issues during installation:
-
-1. **Command timeouts**: By default, commands have a 10-minute timeout. If you're on a slow system, increase it with `--timeout 1200` (20 minutes)
-
-2. **Package installation failures due to locks**: The script automatically retries (5 times by default) when it encounters apt/dpkg locks. If you still encounter lock issues, you can:
-   - Increase the number of retries: `--max-retries 10`
-   - Increase the delay between retries: `--retry-delay 30`
-   - Force continue despite locks: `--force-continue` (use with caution)
-   - Manually check what's locking the apt process:
-     ```bash
-     ps aux | grep -E 'apt|dpkg' | grep -v grep
-     ```
-   - If there's an unattended upgrade in progress, it's best to wait for it to complete
-   - If you're sure no important apt process is running, you can try:
-     ```bash
-     sudo killall apt apt-get dpkg
-     sudo dpkg --configure -a
-     ```
-
-3. **Package installation failures**: Try running these commands manually before installation:
-   ```bash
-   sudo apt-get update
-   sudo dpkg --configure -a
-   sudo apt-get install -y apt-transport-https ca-certificates curl software-properties-common
-   ```
-
-4. **Network issues**: Ensure your server has stable internet access to download Docker and other components
-
-5. **Docker issues**: If Docker installation fails, try installing it manually following the [official instructions](https://docs.docker.com/engine/install/ubuntu/)
-
-6. **SSL certificate issues**: Ensure your domain is correctly pointed to your server's IP address before running the installer
+- `--domain`: Domain name for your Horilla HRMS instance
+- `--email`: Email address for SSL certificates
+- `--admin-username`: Admin username
+- `--admin-password`: Admin password
+- `--install-dir`: Installation directory (default: /root/horilla)
+- `--force-continue`: Continue installation even if apt is locked
 
 ## Manual Installation with Docker and SSL
 
