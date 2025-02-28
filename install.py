@@ -219,7 +219,7 @@ class HorillaInstaller:
         
         # Check if apt is locked
         try:
-            self.run_command("lsof /var/lib/dpkg/lock-frontend", timeout=10)
+            self.run_command("lsof /var/lib/dpkg/lock-frontend", shell=True, timeout=10)
             print("APT is currently locked by another process.")
             if not self.force_continue:
                 print("Please wait for other package managers to finish and try again.")
@@ -268,14 +268,22 @@ class HorillaInstaller:
                 return False
             print("Continuing anyway as --force-continue is set.")
             
-        # Install Docker if not already installed
+        # Check if Docker is installed
+        docker_installed = False
         try:
-            # Check if Docker is already installed
-            self.run_command("docker --version", shell=True, timeout=10)
-            print("Docker is already installed. Skipping Docker installation.")
+            # Try to run docker --version to check if it's installed
+            success, _ = self.run_command("docker --version", shell=True, timeout=10)
+            if success:
+                docker_installed = True
+                print("Docker is already installed. Skipping Docker installation.")
+            else:
+                print("Docker command found but may not be working properly.")
         except:
             print("Installing Docker...")
-            
+            docker_installed = False
+        
+        # Install Docker if not installed
+        if not docker_installed:
             # Add Docker repository
             try:
                 # Add Docker GPG key
@@ -283,17 +291,23 @@ class HorillaInstaller:
                 
                 # Get Ubuntu codename
                 try:
-                    ubuntu_codename = self.run_command("lsb_release -cs", shell=True, timeout=10).strip()
+                    success, ubuntu_codename = self.run_command("lsb_release -cs", shell=True, timeout=10)
+                    ubuntu_codename = ubuntu_codename.strip()
+                    if not success or not ubuntu_codename:
+                        raise Exception("Could not determine Ubuntu codename")
                 except:
                     # If lsb_release is not available, try to get it from /etc/os-release
                     try:
-                        os_release = self.run_command("cat /etc/os-release", shell=True, timeout=10)
-                        for line in os_release.split('\n'):
-                            if line.startswith('VERSION_CODENAME='):
-                                ubuntu_codename = line.split('=')[1].strip('"\'')
-                                break
+                        success, os_release = self.run_command("cat /etc/os-release", shell=True, timeout=10)
+                        ubuntu_codename = None
+                        if success:
+                            for line in os_release.split('\n'):
+                                if line.startswith('VERSION_CODENAME='):
+                                    ubuntu_codename = line.split('=')[1].strip('"\'')
+                                    break
                         if not ubuntu_codename:
-                            raise Exception("Could not determine Ubuntu codename")
+                            print("Could not determine Ubuntu codename. Using 'focal' as fallback.")
+                            ubuntu_codename = 'focal'
                     except:
                         print("Could not determine Ubuntu codename. Using 'focal' as fallback.")
                         ubuntu_codename = 'focal'
@@ -307,42 +321,76 @@ class HorillaInstaller:
                 # Update package lists again
                 self.run_command("apt-get update -y", shell=True, timeout=60)
                 
-                # Install Docker
-                self.run_command("apt-get install -y docker-ce docker-ce-cli containerd.io docker-compose", shell=True, timeout=300)
+                # Install Docker packages
+                docker_pkgs = "docker-ce docker-ce-cli containerd.io"
+                success, _ = self.run_command(f"apt-get install -y {docker_pkgs}", shell=True, timeout=300)
+                if success:
+                    print("Docker installed successfully.")
+                    docker_installed = True
+                else:
+                    print("Failed to install Docker packages. Continuing with installation.")
                 
-                # Start Docker
-                self.run_command("systemctl enable docker", shell=True, timeout=30)
-                self.run_command("systemctl start docker", shell=True, timeout=30)
+                # Try to start Docker service
+                try:
+                    self.run_command("systemctl enable docker", shell=True, timeout=30)
+                    self.run_command("systemctl start docker", shell=True, timeout=30)
+                    print("Docker service started successfully.")
+                except:
+                    try:
+                        self.run_command("service docker start", shell=True, timeout=30)
+                        print("Docker service started successfully (using service command).")
+                    except:
+                        print("Failed to start Docker service. You may need to start it manually after installation.")
                 
-                print("Docker installed successfully.")
             except Exception as e:
                 print(f"Failed to install Docker: {str(e)}")
                 if not self.force_continue:
                     return False
                 print("Continuing anyway as --force-continue is set.")
                 
-        # Install docker-compose using a Python virtual environment to avoid externally-managed environment issues
+        # Install Docker Compose
+        # First check if Docker Compose is already installed
         try:
-            print("Setting up Python virtual environment for dependencies...")
-            venv_path = "/root/horilla_venv"
-            self.run_command(f"python3 -m venv {venv_path}", shell=True, timeout=60)
-            self.run_command(f"{venv_path}/bin/pip install --upgrade pip", shell=True, timeout=60)
-            self.run_command(f"{venv_path}/bin/pip install docker-compose", shell=True, timeout=120)
-            
-            # Create symlink to make docker-compose available system-wide
-            self.run_command(f"ln -sf {venv_path}/bin/docker-compose /usr/local/bin/docker-compose", shell=True)
-            print("Docker Compose installed successfully in virtual environment.")
+            success, _ = self.run_command("docker-compose --version", shell=True, timeout=10)
+            if success:
+                print("Docker Compose is already installed. Skipping Docker Compose installation.")
+            else:
+                # Try to install docker-compose from apt package
+                print("Installing Docker Compose from apt package...")
+                success, _ = self.run_command("apt-get install -y docker-compose", shell=True, timeout=120)
+                if success:
+                    print("Docker Compose installed successfully from apt.")
+                else:
+                    # If apt installation fails, try Python virtual environment
+                    print("Setting up Python virtual environment for Docker Compose...")
+                    venv_path = "/root/horilla_venv"
+                    try:
+                        self.run_command(f"python3 -m venv {venv_path}", shell=True, timeout=60)
+                        self.run_command(f"{venv_path}/bin/pip install --upgrade pip", shell=True, timeout=60)
+                        self.run_command(f"{venv_path}/bin/pip install docker-compose", shell=True, timeout=120)
+                        
+                        # Create symlink to make docker-compose available system-wide
+                        self.run_command(f"ln -sf {venv_path}/bin/docker-compose /usr/local/bin/docker-compose", shell=True)
+                        print("Docker Compose installed successfully in virtual environment.")
+                    except Exception as e:
+                        print(f"Failed to install Docker Compose in virtual environment: {str(e)}")
+                        
+                        # As a last resort, try to download the Docker Compose binary directly
+                        print("Trying to download Docker Compose binary directly...")
+                        try:
+                            self.run_command("curl -L https://github.com/docker/compose/releases/download/v2.20.0/docker-compose-linux-x86_64 -o /usr/local/bin/docker-compose", shell=True, timeout=120)
+                            self.run_command("chmod +x /usr/local/bin/docker-compose", shell=True)
+                            print("Docker Compose binary installed successfully.")
+                        except Exception as e2:
+                            print(f"Failed to download Docker Compose binary: {str(e2)}")
+                            if not self.force_continue:
+                                return False
+                            print("Continuing anyway as --force-continue is set.")
         except Exception as e:
-            print(f"Failed to install Python dependencies: {str(e)}")
-            print("Attempting to install docker-compose package from apt...")
-            try:
-                self.run_command("apt-get install -y docker-compose", shell=True, timeout=120)
-                print("Docker Compose installed successfully from apt.")
-            except Exception as e2:
-                print(f"Failed to install Docker Compose: {str(e2)}")
-                if not self.force_continue:
-                    return False
-                print("Continuing anyway as --force-continue is set.")
+            print(f"Error checking Docker Compose installation: {str(e)}")
+            if not self.force_continue:
+                return False
+            print("Continuing anyway as --force-continue is set.")
             
         print("✓ All dependencies installed successfully.")
         return True
@@ -773,8 +821,8 @@ else:
             print(f"Failed to start Docker containers: {output}")
             return False
         
-        # Wait for the database to be ready
-        print("Waiting for database to be ready...")
+        # Wait a moment for the web container to be ready
+        print("Waiting for web container to be ready...")
         time.sleep(10)
         
         # Run migrations
@@ -911,249 +959,311 @@ else:
                 
         return True
 
-    def setup_backup_system(self):
-        """Set up the backup system with Rclone and BorgBackup."""
-        print("\n📦 Setting up backup system...")
+    def configure_backup_system(self):
+        """Configure automated backups with BorgBackup and rclone."""
+        if not self.enable_backups:
+            print("Skipping backup system configuration as it's not enabled.")
+            return True
+            
+        print("\n[7/8] Configuring backup system...")
         
         try:
-            # Install Rclone
-            print("Installing Rclone...")
-            self.run_command("curl https://rclone.org/install.sh | bash")
+            # Create backup directory
+            backup_dir = f"{self.install_dir}/backups"
+            self.run_command(f"mkdir -p {backup_dir}", shell=True)
+            print(f"✓ Created backup directory: {backup_dir}")
             
-            # Install BorgBackup
-            print("Installing BorgBackup...")
-            self.run_command("apt-get install -y borgbackup")
+            # Configure rclone for S3 storage
+            print("Configuring rclone for S3 storage...")
             
-            # Configure Rclone
-            print("Configuring Rclone...")
-            self.configure_rclone()
+            # Generate rclone.conf
+            rclone_conf_dir = "/root/.config/rclone"
+            self.run_command(f"mkdir -p {rclone_conf_dir}", shell=True)
             
-            # Create mount point
-            print("Creating S3 mount point...")
-            self.run_command("mkdir -p /mnt/s3backup")
+            # Determine the S3 provider
+            if self.s3_provider == "1":  # AWS S3
+                rclone_conf = f"""[horilla-backup]
+type = s3
+provider = AWS
+env_auth = false
+access_key_id = {self.s3_access_key}
+secret_access_key = {self.s3_secret_key}
+region = {self.s3_region}
+location_constraint = {self.s3_region}
+acl = private
+"""
+            elif self.s3_provider == "2":  # Wasabi
+                rclone_conf = f"""[horilla-backup]
+type = s3
+provider = Wasabi
+env_auth = false
+access_key_id = {self.s3_access_key}
+secret_access_key = {self.s3_secret_key}
+region = {self.s3_region}
+endpoint = s3.wasabisys.com
+acl = private
+"""
+            elif self.s3_provider == "3":  # Backblaze B2
+                rclone_conf = f"""[horilla-backup]
+type = b2
+account = {self.s3_access_key}
+key = {self.s3_secret_key}
+"""
+            elif self.s3_provider == "4":  # DigitalOcean Spaces
+                rclone_conf = f"""[horilla-backup]
+type = s3
+provider = DigitalOcean
+env_auth = false
+access_key_id = {self.s3_access_key}
+secret_access_key = {self.s3_secret_key}
+endpoint = {self.s3_region}.digitaloceanspaces.com
+acl = private
+"""
+            else:  # Other S3-compatible (default)
+                rclone_conf = f"""[horilla-backup]
+type = s3
+provider = Other
+env_auth = false
+access_key_id = {self.s3_access_key}
+secret_access_key = {self.s3_secret_key}
+region = {self.s3_region}
+endpoint = s3.{self.s3_region}.amazonaws.com
+force_path_style = true
+acl = private
+"""
+                
+            # Write rclone.conf
+            with open(f"{rclone_conf_dir}/rclone.conf", "w") as f:
+                f.write(rclone_conf)
+                
+            print("✓ Generated rclone configuration")
             
-            # Create Rclone mount service
-            print("Creating Rclone mount service...")
-            self.create_rclone_service()
+            # Test rclone configuration
+            print("Testing rclone configuration...")
+            success, output = self.run_command(f"rclone lsd horilla-backup:{self.s3_bucket_name}", shell=True, timeout=30)
+            if not success:
+                print(f"⚠️ Warning: Failed to verify rclone configuration: {output}")
+                
+                # Try to create the bucket if it doesn't exist
+                print(f"Attempting to create bucket '{self.s3_bucket_name}'...")
+                success, output = self.run_command(f"rclone mkdir horilla-backup:{self.s3_bucket_name}", shell=True, timeout=30)
+                if not success:
+                    print(f"⚠️ Warning: Failed to create bucket: {output}")
+                    print("You may need to manually create the bucket or check your S3 credentials.")
+                    if not self.force_continue:
+                        return False
+                    print("Continuing anyway as --force-continue is set.")
+                else:
+                    print(f"✓ Created bucket: {self.s3_bucket_name}")
+            else:
+                print("✓ Successfully connected to S3 storage")
+                
+            # Create borg passphrase
+            borg_passphrase = secrets.token_hex(16)  # Generate random passphrase
             
             # Create backup script
             print("Creating backup script...")
-            self.create_backup_script()
-            
-            # Set up cron job
-            print("Setting up backup schedule...")
-            self.setup_backup_schedule()
-            
-            print("✓ Backup system setup completed successfully!")
-            return True
-        except Exception as e:
-            print(f"❌ Backup system setup failed: {str(e)}")
-            traceback.print_exc()
-            return False
-            
-    def configure_rclone(self):
-        """Configure Rclone with S3 credentials."""
-        # Create rclone config file
-        config_dir = "/root/.config/rclone"
-        self.run_command(f"mkdir -p {config_dir}")
-        
-        # Determine provider type and endpoint
-        provider_type = "s3"
-        provider_endpoint = ""
-        
-        if self.s3_provider == "wasabi":
-            provider_endpoint = f"s3.{self.s3_region}.wasabisys.com"
-        elif self.s3_provider == "b2":
-            provider_type = "b2"
-        elif self.s3_provider == "digitalocean":
-            provider_endpoint = f"{self.s3_region}.digitaloceanspaces.com"
-        elif self.s3_provider == "other":
-            # For other providers, we'd need more info, but we'll use a generic S3 config
-            pass
-        
-        # Create config content
-        config_content = "[s3backup]\n"
-        
-        if provider_type == "s3":
-            config_content += "type = s3\n"
-            config_content += f"access_key_id = {self.s3_access_key}\n"
-            config_content += f"secret_access_key = {self.s3_secret_key}\n"
-            config_content += f"region = {self.s3_region}\n"
-            
-            if provider_endpoint:
-                config_content += f"endpoint = {provider_endpoint}\n"
-        elif provider_type == "b2":
-            config_content += "type = b2\n"
-            config_content += f"account = {self.s3_access_key}\n"
-            config_content += f"key = {self.s3_secret_key}\n"
-        
-        # Write config file
-        with open(f"{config_dir}/rclone.conf", "w") as f:
-            f.write(config_content)
-            
-        # Ensure bucket exists by creating it if it doesn't
-        try:
-            self.run_command(f"rclone mkdir s3backup:{self.s3_bucket_name}/horilla-backups")
-            return True
-        except Exception as e:
-            print(f"Error configuring rclone: {str(e)}")
-            print("Please check your S3 credentials and region.")
-            return False
+            backup_script_path = f"{backup_dir}/backup.sh"
+            backup_script_content = f"""#!/bin/bash
+# Horilla HRMS automated backup script
 
-
-    def create_rclone_service(self):
-        """Create systemd service for Rclone mount."""
-        service_content = """[Unit]
-Description=RClone S3 Mount
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=simple
-ExecStart=/usr/bin/rclone mount s3backup:{bucket_name} /mnt/s3backup \\
-  --allow-other \\
-  --buffer-size 32M \\
-  --dir-cache-time 72h \\
-  --log-level INFO \\
-  --vfs-cache-mode writes \\
-  --vfs-cache-max-size 1G \\
-  --vfs-read-chunk-size 64M
-
-ExecStop=/bin/fusermount -uz /mnt/s3backup
-Restart=on-failure
-RestartSec=30
-
-[Install]
-WantedBy=multi-user.target
-""".format(bucket_name=self.s3_bucket_name)
-
-        # Write service file
-        with open("/etc/systemd/system/rclone-mount.service", "w") as f:
-            f.write(service_content)
-            
-        # Enable and start service
-        self.run_command("systemctl daemon-reload")
-        self.run_command("systemctl enable rclone-mount.service")
-        self.run_command("systemctl start rclone-mount.service")
-        
-    def create_backup_script(self):
-        """Create the backup script."""
-        script_content = """#!/bin/bash
-# Horilla Backup Script
-
-# Variables
+# Set up environment
+export BORG_PASSPHRASE="{borg_passphrase}"
 TIMESTAMP=$(date +%Y-%m-%d_%H-%M-%S)
-BACKUP_DIR="/tmp/horilla_backup_${TIMESTAMP}"
-BORG_REPO="/mnt/s3backup/{bucket_name}/horilla-backups"
-DB_CONTAINER="horilla_db_1"  # Update this if your container name is different
-DB_USER="postgres"
-DB_NAME="horilla"
+BACKUP_DIR="{backup_dir}"
+INSTALL_DIR="{self.install_dir}"
+BUCKET_NAME="{self.s3_bucket_name}"
 
-# Create temporary backup directory
-mkdir -p "${BACKUP_DIR}"
+# Ensure backup directory exists
+mkdir -p $BACKUP_DIR
 
-# Backup the database
-echo "Creating database backup..."
-docker compose -f {install_dir}/docker-compose.yml exec db pg_dump -U ${DB_USER} ${DB_NAME} > "${BACKUP_DIR}/horilla_db.sql"
+# PostgreSQL Backup
+echo "Backing up PostgreSQL database..."
+cd $INSTALL_DIR
+docker-compose exec -T db pg_dump -U horilla -d horilla > $BACKUP_DIR/horilla_db_$TIMESTAMP.sql
 
-# Backup application files (excluding .git and other unnecessary files)
-echo "Creating application files backup..."
-tar --exclude='{install_dir}/.git' --exclude='{install_dir}/node_modules' -czf "${BACKUP_DIR}/horilla_files.tar.gz" {install_dir}
+# Compress the database dump
+gzip $BACKUP_DIR/horilla_db_$TIMESTAMP.sql
 
-# Create borg backup
-echo "Creating borg backup..."
-borg create --stats --progress \\
-    "${BORG_REPO}::horilla-${TIMESTAMP}" \\
-    "${BACKUP_DIR}"
+# Backup application files (excluding large directories)
+echo "Backing up application files..."
+tar -czf $BACKUP_DIR/horilla_files_$TIMESTAMP.tar.gz -C $INSTALL_DIR \\
+    --exclude="node_modules" \\
+    --exclude="static" \\
+    --exclude="media/cache" \\
+    .
 
-# Clean up temporary files
-echo "Cleaning up temporary files..."
-rm -rf "${BACKUP_DIR}"
+# Upload to S3
+echo "Uploading to S3..."
+rclone copy $BACKUP_DIR/horilla_db_$TIMESTAMP.sql.gz horilla-backup:$BUCKET_NAME/database/
+rclone copy $BACKUP_DIR/horilla_files_$TIMESTAMP.tar.gz horilla-backup:$BUCKET_NAME/files/
 
-# Prune old backups (keep last 7 daily, 4 weekly, and 6 monthly backups)
-echo "Pruning old backups..."
-borg prune --stats --list "${BORG_REPO}" \\
-    --keep-daily=7 \\
-    --keep-weekly=4 \\
-    --keep-monthly=6
+# Keep only the last 7 local backups
+echo "Cleaning up old local backups..."
+cd $BACKUP_DIR
+ls -t horilla_db_*.sql.gz | tail -n +8 | xargs -r rm
+ls -t horilla_files_*.tar.gz | tail -n +8 | xargs -r rm
 
-echo "Backup completed successfully."
-""".format(bucket_name=self.s3_bucket_name, install_dir=self.install_dir)
-
-        # Write script file
-        with open("/root/backup-horilla.sh", "w") as f:
-            f.write(script_content)
+# Report success
+echo "Backup completed successfully at $(date)"
+"""
             
-        # Make script executable
-        self.run_command("chmod +x /root/backup-horilla.sh")
-        
-    def setup_backup_schedule(self):
-        """Set up cron job for backups."""
-        cron_schedule = ""
-        
-        if self.backup_frequency == "daily":
-            cron_schedule = "0 2 * * *"
-        elif self.backup_frequency == "weekly":
-            cron_schedule = "0 2 * * 0"  # Sundays at 2 AM
-        elif self.backup_frequency == "monthly":
-            cron_schedule = "0 2 1 * *"  # 1st day of month at 2 AM
+            # Write backup script
+            with open(backup_script_path, "w") as f:
+                f.write(backup_script_content)
+                
+            # Make backup script executable
+            self.run_command(f"chmod +x {backup_script_path}", shell=True)
+            print("✓ Created backup script")
             
-        # Add cron job
-        cron_job = f"{cron_schedule} /root/backup-horilla.sh > /var/log/horilla-backup.log 2>&1\n"
-        
-        # Write to crontab
-        with open("/tmp/horilla-crontab", "w") as f:
-            f.write(cron_job)
+            # Set up cron job based on frequency
+            print("Setting up backup schedule...")
+            cron_schedule = {
+                "1": "0 2 * * *",        # Daily at 2 AM
+                "2": "0 2 * * 0",        # Weekly on Sunday at 2 AM
+                "3": "0 2 1 * *"         # Monthly on 1st at 2 AM
+            }
             
-        self.run_command("crontab -u root /tmp/horilla-crontab")
-        self.run_command("rm /tmp/horilla-crontab")
+            schedule = cron_schedule.get(str(self.backup_frequency), "0 2 * * *")  # Default to daily
+            
+            # Add cron job
+            cron_line = f"{schedule} {backup_script_path} >> {backup_dir}/backup.log 2>&1"
+            cron_file = "/tmp/horilla_cron"
+            
+            # Get existing crontab
+            success, existing_crontab = self.run_command("crontab -l 2>/dev/null || echo ''", shell=True)
+            
+            # Check if the backup job is already in crontab
+            if backup_script_path in existing_crontab:
+                # Remove the existing entry
+                filtered_crontab = "\n".join([line for line in existing_crontab.splitlines() if backup_script_path not in line])
+                with open(cron_file, "w") as f:
+                    f.write(filtered_crontab + "\n")
+            else:
+                # Just write existing crontab to file
+                with open(cron_file, "w") as f:
+                    f.write(existing_crontab + "\n")
+                    
+            # Append new cron job
+            with open(cron_file, "a") as f:
+                f.write(cron_line + "\n")
+                
+            # Install new crontab
+            self.run_command(f"crontab {cron_file}", shell=True)
+            self.run_command(f"rm {cron_file}", shell=True)
+            
+            print("✓ Set up backup schedule")
+            
+            print("✓ Backup system configured successfully")
+            return True
+            
+        except Exception as e:
+            print(f"❌ Failed to configure backup system: {str(e)}")
+            traceback.print_exc()
+            if not self.force_continue:
+                return False
+            print("Continuing anyway as --force-continue is set.")
+            return True
 
     def install(self):
         """Main installation method."""
-        try:
-            print("Starting Horilla HRMS installation...")
-            
-            # Check system requirements
-            if not self.check_system_requirements():
-                return False
-            
-            # Validate inputs
-            if not self.validate_inputs():
-                return False
-                
-            # Install dependencies
-            if not self.install_dependencies():
-                return False
-                
-            # Clone repository
-            if not self.setup_horilla():
-                return False
-                
-            # Configure settings
-            if not self.configure_settings():
-                return False
-                
-            # Set up Docker
-            if not self.initialize_application():
-                return False
-                
-            # Set up backup system if enabled
-            if self.enable_backups:
-                if not self.setup_backup_system():
-                    print("Warning: Backup system setup failed, but installation will continue.")
-                    # Don't return False here, as we want the installation to continue even if backup setup fails
-            
-            print("\n✅ Horilla HRMS installation completed successfully!")
-            print(f"You can access your Horilla HRMS instance at: https://{self.domain}")
-            print(f"Admin username: {self.admin_username}")
-            print(f"Admin password: {self.admin_password}")
-            
-            return True
-        except Exception as e:
-            print(f"❌ Installation failed: {str(e)}")
-            traceback.print_exc()
+        title = """
+ _   _           _ _ _         _   _ _____  __  __ _____ 
+| | | | ___  _ __(_) | | __ _  | | | |  __ \|  \/  / ____|
+| |_| |/ _ \| '__| | | |/ _` | | |_| | |__) | \  / | (___  
+|  _  | (_) | |  | | | | (_| | |  _  |  _  /| |\/| |\___ \\ 
+|_| |_|\___/|_|  |_|_|_|\__,_| |_| |_|_| \_\_|  |_|____/ 
+                                                         
+        """
+        print(title)
+        print("Starting Horilla HRMS installation...")
+        print(f"Installation directory: {self.install_dir}")
+        
+        # Check system requirements
+        if not self.check_system_requirements():
+            print("❌ System requirements check failed. Please fix the issues and try again.")
             return False
-
+        
+        # Install dependencies
+        if not self.install_dependencies():
+            print("❌ Failed to install dependencies. Please fix the issues and try again.")
+            return False
+        
+        # Clone repository
+        if not self.clone_repository():
+            print("❌ Failed to clone repository. Please check your internet connection and try again.")
+            return False
+        
+        # Configure application
+        if not self.configure_application():
+            print("❌ Failed to configure application. Please check the configuration and try again.")
+            return False
+        
+        # Initialize application
+        if not self.initialize_application():
+            print("❌ Failed to initialize application. Please check the logs and try again.")
+            return False
+        
+        # Configure SSL
+        if not self.force_no_ssl:
+            if not self.configure_ssl():
+                print("⚠️ SSL configuration failed. The application will still be accessible over HTTP.")
+                # Don't return False here, as we want the installation to continue even if SSL fails
+        
+        # Configure backup system if enabled
+        if self.enable_backups:
+            if not self.configure_backup_system():
+                print("⚠️ Backup system configuration failed, but installation will continue.")
+                # Don't return False here, as we want the installation to continue even if backup setup fails
+        
+        # Final steps
+        print("\n[8/8] Finalizing installation...")
+        
+        # Print installation summary
+        print("\n" + "="*80)
+        print("✅ Horilla HRMS installation completed successfully!")
+        print("="*80)
+        print("\nApplication Information:")
+        print(f"URL: {'https' if not self.force_no_ssl else 'http'}://{self.domain}")
+        print(f"Admin Username: {self.admin_username}")
+        print(f"Admin Email: {self.admin_email}")
+        print(f"Admin Password: {'*' * len(self.admin_password)} (As provided during setup)")
+        print(f"Installation Directory: {self.install_dir}")
+        
+        # Print backup information if enabled
+        if self.enable_backups:
+            print("\nBackup Information:")
+            print(f"Backup Provider: {self.get_s3_provider_name()}")
+            print(f"Backup Bucket: {self.s3_bucket_name}")
+            print(f"Backup Frequency: {self.get_backup_frequency_name()}")
+            print(f"Backup Script: {self.install_dir}/backups/backup.sh")
+        
+        print("\nDocumentation: https://github.com/horilla-opensource/horilla/wiki")
+        print("\nSupport: https://github.com/horilla-opensource/horilla/issues")
+        
+        print("\nThank you for installing Horilla HRMS!")
+        return True
+    
+    def get_s3_provider_name(self):
+        """Get the name of the S3 provider."""
+        providers = {
+            "1": "AWS S3",
+            "2": "Wasabi",
+            "3": "Backblaze B2",
+            "4": "DigitalOcean Spaces",
+            "5": "Other S3-compatible"
+        }
+        return providers.get(str(self.s3_provider), "Unknown")
+    
+    def get_backup_frequency_name(self):
+        """Get the name of the backup frequency."""
+        frequencies = {
+            "1": "Daily",
+            "2": "Weekly",
+            "3": "Monthly"
+        }
+        return frequencies.get(str(self.backup_frequency), "Unknown")
+    
     def run(self):
         """Run the complete installation process."""
         print("=" * 60)
@@ -1174,38 +1284,61 @@ echo "Backup completed successfully."
         return success
 
     def validate_domain(self, domain):
-        """Validate domain format."""
-        if not domain:
-            print("Domain cannot be empty.")
-            return False
+        """
+        Validate domain name.
+        
+        Args:
+            domain (str): Domain name to validate
             
-        # Allow .nip.io domains (automatic DNS)
+        Returns:
+            bool: True if valid, False otherwise
+        """
+        # Check for nip.io domains which are valid for local testing
         if domain.endswith('.nip.io'):
+            ip_part = domain.split('.nip.io')[0]
+            # Check if the IP part is valid
+            try:
+                # Split by dots and check each octet
+                octets = ip_part.split('.')
+                if len(octets) != 4:
+                    return False
+                    
+                for octet in octets:
+                    num = int(octet)
+                    if num < 0 or num > 255:
+                        return False
+                        
+                return True
+            except:
+                return False
+                
+        # Regular domain validation
+        domain_pattern = r'^(?:[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z0-9][a-zA-Z0-9-]{0,61}[a-zA-Z0-9]$'
+        if re.match(domain_pattern, domain):
             return True
             
-        # Basic domain validation
-        domain_pattern = r'^([a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,}$'
-        if not re.match(domain_pattern, domain):
-            print("Invalid domain format. Please enter a valid domain (e.g., hrms.example.com).")
-            return False
-        
-        # DNS check is optional since the user might be setting up DNS afterward
-        print(f"✓ Domain '{domain}' format is valid")
-        return True
+        return False
         
     def validate_email(self, email):
-        """Validate email format."""
-        if not email:
-            print("Email cannot be empty.")
-            return False
+        """
+        Validate email address.
+        
+        Args:
+            email (str): Email to validate
             
-        email_pattern = re.compile(r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$')
-        if not email_pattern.match(email):
-            print("Invalid email format. Please enter a valid email address.")
-            return False
-            
-        print(f"✓ Email '{email}' format is valid")
-        return True
+        Returns:
+            bool: True if valid, False otherwise
+        """
+        # Use a more comprehensive email validation pattern
+        email_pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
+        if re.match(email_pattern, email):
+            # Check if domain part exists
+            parts = email.split('@')
+            if len(parts) == 2 and parts[0] and parts[1]:
+                # Additional validation for domain part
+                return self.validate_domain(parts[1])
+                
+        return False
 
     def initialize_application(self):
         """
